@@ -11,6 +11,7 @@ import { personaFromConfig } from "./src/dshprofile.js";
 import { createAuditor, setAuditChannel, loadRubric } from "./src/audit.js";
 import { createSearch, SEARCH_PROFILE_ID, SEARCH_PERSONA } from "./src/search.js";
 import { createMemeLibrary } from "./src/meme.js";
+import { createWebUi } from "./src/webui.js";
 import { CONFIG_FILE, DATA_ROOT } from "./src/paths.js";
 
 const args = process.argv.slice(2);
@@ -88,13 +89,29 @@ const runtime = createRuntime({
   log: log
 });
 
+// N25 配置端：本地 HTTP 服务，只听 127.0.0.1
+const webui = createWebUi({ config: cfg, table: table, store: store, memes: memes, runtime: runtime, labels: runtime.labels, configFile: CONFIG_FILE });
+
 if (selftest) {
+  if (rc.webuiEnabled) {
+    const info = await webui.listen(0);
+    const probe = await fetch(info.url + "/api/status").then(function (r) { return r.json(); }).catch(function () { return null; });
+    log("配置端自检：" + info.url + "  /api/status ok=" + !!(probe && probe.ok) + "  /api/config 分组=" + table.分组.length);
+    await webui.close();
+  } else {
+    log("配置端：已停用");
+  }
   const st = runtime.status();
   log("自检通过：" + JSON.stringify({ mode: st.mode, onebotState: ob.state(), config: redactConfig(cfg, table).runtime || null }));
   const ls = runtime.labelStatus();
   log("学习：待标注 " + (ls ? ls.pending : 0) + " 条 / 已标注 " + (ls ? ls.labeled : 0) + " 条（满 " + (ls ? ls.minSamples : 30) + " 条自动回流标定）");
   log("配置片断：" + JSON.stringify({ persona: redactConfig(cfg, table).persona, napcat: redactConfig(cfg, table).napcat }));
   process.exit(0);
+}
+
+if (rc.webuiEnabled) {
+  webui.listen(rc.webuiPort).then(function (info) { log("配置端：" + info.url); })
+    .catch(function (e) { log("配置端启动失败：" + e.message); });
 }
 
 ob.connect();

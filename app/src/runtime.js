@@ -383,7 +383,7 @@ export function createRuntime(deps) {
 
   function status() {
     return {
-      mode: rc.observe === true ? "observe" : "live",
+      mode: rc.observe === true ? "observe" : rc.observe === false ? "live" : (rc.stageMode || "auto"),
       stats: Object.assign({}, stats),
       pending: coalescer.size(),
       budget: budget.status(),

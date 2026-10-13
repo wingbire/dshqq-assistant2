@@ -118,6 +118,8 @@ export function runtimeConfig(cfg) {
       maxPerHour: getPath(c, "autojoin.maxPerHour") != null ? getPath(c, "autojoin.maxPerHour") : 6,
       maxChars: 20
     },
+    webuiEnabled: getPath(c, "runtime.webui.enabled") !== false,
+    webuiPort: getPath(c, "runtime.webui.port") != null ? getPath(c, "runtime.webui.port") : 8799,
     autojoinRate: getPath(c, "autojoin.rate") != null ? getPath(c, "autojoin.rate") : 0.25,
     minGapSec: getPath(c, "autojoin.minGapSec") != null ? getPath(c, "autojoin.minGapSec") : 120
   };

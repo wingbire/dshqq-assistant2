@@ -24,6 +24,7 @@ import { createLabelQueue, foldLabels, pendingOf, labeledOf, agreementStats, sho
 import { buildProfilePrompt } from "../app/src/profile.js";
 import { createMemeLibrary, shouldAttachMeme, scoreRow, scanPack, resolveMemeRoots, MEME_DEFAULTS } from "../app/src/meme.js";
 import { createCommands, createDefaultCommands, permLevelOf, allow } from "../app/src/commands.js";
+import { createWebUi, summarizeObservations, DEFAULT_PORT } from "../app/src/webui.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1360,6 +1361,65 @@ t("runtime: 不满足条件时不插话（不抢话/预算关闭）", async func
   await rt2.tick(200);
   eq(sent.length, 0, "预算硬线之上不该主动插话");
   eq(rt2.stats().proactiveBlocked, 1);
+});
+
+// ===== P5：配置端（N25）=====
+
+t("webui: summarizeObservations 汇总判决/分档/小时/缓存", function () {
+  const rows = [
+    { kind: "decision", verdict: "yes", tier: "mid", action: "brain", at: new Date(2026, 0, 1, 9, 0, 0).toISOString() },
+    { kind: "decision", verdict: "no", tier: "low", action: "ignore", at: new Date(2026, 0, 1, 9, 5, 0).toISOString() },
+    { kind: "sent", tier: "mid", usage: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 1800, cacheWriteTokens: 0 }, meme: { tag: "sigh" } },
+    { kind: "proactive_sent" }
+  ];
+  const c = summarizeObservations(rows);
+  eq(c.verdicts.yes, 1);
+  eq(c.verdicts.no, 1);
+  eq(c.tiers.mid, 1);
+  eq(c.hours[9], 2);
+  eq(c.replies, 1);
+  eq(c.memes, 1);
+  eq(c.proactives, 1);
+  eq(c.cacheHitRate, 0.9, "1800 / (200+1800+0)");
+  eq(c.tokens, 240, "输入 200 + 2×输出 20");
+  eq(summarizeObservations([]).rows, 0);
+});
+
+t("webui: 配置端 API 读写、遮蔽 secret、挡目录穿越", async function () {
+  const table = loadFieldTable();
+  const cfg = deepMerge(defaultsFromTable(table), { napcat: { token: "SECRET-TOKEN" } });
+  const ui = createWebUi({ config: cfg, table: table });
+  const info = await ui.listen(0);
+  try {
+    eq(info.port > 0 && info.port !== DEFAULT_PORT, true, "端口 0 应挑一个临时端口");
+    const j1 = await (await fetch(info.url + "/api/config")).json();
+    eq(j1.ok, true);
+    eq(j1.table.分组.length, 5);
+    eq(j1.values.napcat.token, "<已配置>", "secret 不能明文回前端");
+    ok(JSON.stringify(j1.values).indexOf("SECRET-TOKEN") < 0);
+    eq(j1.runtime.webuiPort, 8799);
+
+    const posted = await (await fetch(info.url + "/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ patch: { persona: { botName: "新名字" } } }) })).json();
+    eq(posted.ok, true);
+    eq(posted.values.persona.botName, "新名字");
+    eq(ui.getConfig().persona.botName, "新名字", "服务端内存里的配置也要跟着变");
+    eq(ui.getConfig().persona.age, "二十来岁", "没提交的字段不能被抹掉（深合并）");
+
+    const home = await fetch(info.url + "/");
+    eq(home.status, 200);
+    ok((home.headers.get("content-type") || "").indexOf("text/html") >= 0);
+    const js = await fetch(info.url + "/app.js");
+    eq(js.status, 200);
+    const css = await fetch(info.url + "/app.css");
+    eq(css.status, 200);
+
+    const hack = await fetch(info.url + "/../app/dsh-data/config/app.json");
+    ok(hack.status >= 400, "目录穿越必须被挡住，实得 " + hack.status);
+    const bad = await fetch(info.url + "/api/config", { method: "POST", headers: { "content-type": "application/json" }, body: "{不是 json" });
+    eq(bad.status, 400);
+  } finally {
+    await ui.close();
+  }
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===
