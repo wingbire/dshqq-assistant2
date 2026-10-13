@@ -4,7 +4,7 @@ import path from "node:path";
 
 import { DSH_HOME, BRAIN_TMP_DIR } from "./paths.js";
 import { pickApiKey } from "./secrets.js";
-import { PROFILE_ID, ensureProfile, buildPersonaText, writeProfilePatch } from "./dshprofile.js";
+import { PROFILE_ID, ensureProfile, buildPersonaText, writeProfilePatch, writeAllTierOverlays } from "./dshprofile.js";
 
 export { buildPersonaText };
 export const PROFILE_DEFAULT = PROFILE_ID;   // N1/F-3 决策：与 profile 实际名字统一为 qq-brain
@@ -166,7 +166,10 @@ export function parseEvents(stdout) {
 
 export function buildArgs(o) {
   const launch = o.launch;
-  const args = ["--expose-internals", launch.cliJs, "--profile", o.profile, o.appName];
+  const args = ["--expose-internals", launch.cliJs, "--profile", o.profile];
+  // --patch 是启动器级参数，必须排在 app 名（headless）之前
+  for (const p of (o.patchFiles || [])) args.push("--patch", p);
+  args.push(o.appName);
   if (o.json !== false) args.push("--json");
   args.push(o.promptText || "");
   for (const extra of (o.extraArgs || [])) args.push(extra);
@@ -190,7 +193,7 @@ export function runBrain(opts) {
     if (!launch) return resolve({ ok: false, error: "找不到 DSH 启动器（cliPath 无效）", usage: emptyUsage(), cacheHitRate: 0 });
     const profile = o.profile || PROFILE_DEFAULT;
     const appName = o.appName || APP_NAME;
-    const args = buildArgs({ launch: launch, profile: profile, appName: appName, promptText: o.promptText, json: o.json, extraArgs: o.extraArgs });
+    const args = buildArgs({ launch: launch, profile: profile, appName: appName, promptText: o.promptText, json: o.json, extraArgs: o.extraArgs, patchFiles: o.patchFiles });
 
     const mode = o.outputMode || "file";
     let outFd = null, errFd = null, outPath = null, errPath = null, child = null;
@@ -256,7 +259,8 @@ export function ensureBrainProfile(opts) {
   const profileId = o.profile || PROFILE_DEFAULT;
   const r = ensureProfile({ dshHome: dshHome, profileId: profileId, launch: launch, timeoutMs: o.timeoutMs });
   if (!r.ok) return r;
-  const personaText = buildPersonaText(o.persona);
+  const personaText = o.personaText != null ? String(o.personaText) : buildPersonaText(o.persona);
   const file = writeProfilePatch(dshHome, profileId, personaText);
-  return { ok: true, created: r.created, dir: r.dir, patch: file };
+  const tiers = writeAllTierOverlays(dshHome, profileId);
+  return { ok: true, created: r.created, dir: r.dir, patch: file, tiers: tiers };
 }

@@ -10,6 +10,38 @@ import { ensureDir, DSH_HOME, PROFILES_DIR } from "./paths.js";
 // 是唯一字节稳定、能吃满前缀缓存的位置（技术架构文档 §4.4）。
 export const PROFILE_ID = "qq-brain";
 
+// 档位 → reasoningEffort（实测：该键会被 dsh-agent-default-model 接受并合成，见 设计节点.md §14/§15）
+export const TIER_EFFORT = { low: "off", mid: "low", high: "high" };
+export const TIER_ORDER = ["low", "mid", "high"];
+
+export function tierOverlayPath(dshHome, profileId, tier) {
+  return path.join(profileDir(dshHome, profileId), "tier-" + tier + ".patch.yml");
+}
+
+// 三档 overlay：只改模型调用参数，不碰人设 —— 所以 personaPrefix 的字节在三档间完全一致，
+// 前缀缓存可以跨档共享（这是把「三个 profile」换成「一个 profile + 三个补丁」的原因）。
+export function renderTierOverlay(tier, base) {
+  const effort = TIER_EFFORT[tier] || "low";
+  const entry = {
+    id: "agent-default-model",
+    config: Object.assign({ provider: "deepseek-official", model: "deepseek-flash", reasoningEffort: effort }, base || {})
+  };
+  return JSON.stringify([entry], null, 2) + String.fromCharCode(10);
+}
+
+export function writeTierOverlay(dshHome, profileId, tier) {
+  const dir = ensureDir(profileDir(dshHome, profileId));
+  const file = path.join(dir, "tier-" + tier + ".patch.yml");
+  fs.writeFileSync(file, renderTierOverlay(tier), "utf8");
+  return file;
+}
+
+export function writeAllTierOverlays(dshHome, profileId) {
+  const out = {};
+  for (const t of TIER_ORDER) out[t] = writeTierOverlay(dshHome, profileId, t);
+  return out;
+}
+
 export const PERSONA_FIELDS = [
   "botName", "age", "traits", "interests", "dislikes",
   "tone", "overflow", "memeRate"

@@ -5,6 +5,7 @@ import { createBrakes, parseAdminCommand, isAdmin } from "./brakes.js";
 import { localReply } from "./localreply.js";
 import { depthPolicy, buildTaskText } from "./brain.js";
 import { parseMeme } from "./audit.js";
+import { injectSummary } from "./search.js";
 
 // P1 接入层装配。所有外部副作用（send / askBrain / now / rng / store）都可注入，
 // 所以整套流程能在没有 QQ、没有模型的情况下被测试。
@@ -16,6 +17,7 @@ export function createRuntime(deps) {
   const bot = d.bot;
   const send = d.send || function () { return false; };
   const askBrain = d.askBrain || null;
+  const searchSvc = d.search || null;
   const now = d.now || function () { return Date.now(); };
   const rng = d.rng || Math.random;
   const log = d.log || function () {};
@@ -24,11 +26,17 @@ export function createRuntime(deps) {
 
   const evtDefaults = d.evtDefaults || {};      // botNames / nicknames / interests 等，来自人设配置
   const lastBot = new Map();                    // gid -> { lastBotText, lastBotAt }，供「连续性」特征用
+  // N8（修订）：成员表初始为空，首次收到该成员消息时再加 —— 不再启动时全量拉群成员
+  const members = new Map();                    // gid -> Map(uid -> { speaker, role, firstSeen, lastSeen, count })
+  // N8（修订）：上下文窗口放在 prompt 最后，前面只放本轮任务与资料，避免前置变量打散缓存
+  const history = new Map();                    // gid -> [{ speaker, text, at }]  最多 contextWindow 条
+  // N9（修订）：观察只在新群初期，攒满 observeUntilMessages 条后进半自动，semiAutoDays 天后全自动
+  const stages = new Map();                     // gid -> { stage, observed, semiUntil, since }
   const coalescer = createCoalescer({ windowMs: rc.coalesceWindowMs, maxBatch: rc.coalesceMaxBatch });
   const budget = d.budget || createBudget({ limits: rc.budget, now: now });
   const brakes = d.brakes || createBrakes({ config: cfg, now: now });
 
-  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, stopped: 0, adminCmds: 0 };
+  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0 };
   let busy = false;
 
   function observe(rec) {
@@ -37,6 +45,53 @@ export function createRuntime(deps) {
   }
 
   function adminConfig() { return cfg.admin || {}; }
+
+  const STAGE_OBSERVE = "observe", STAGE_SEMI = "semi", STAGE_FULL = "full";
+  const OBSERVE_UNTIL_MESSAGES = rc.observeUntilMessages != null ? rc.observeUntilMessages : 80;   // N9
+  const SEMI_AUTO_DAYS = rc.semiAutoDays != null ? rc.semiAutoDays : 3;                            // N9
+
+  function stageOf(gid, nowMs) {
+    if (rc.observe === true) return { stage: STAGE_OBSERVE, observed: 0, forced: true };   // 强制观察
+    if (rc.observe === false) return { stage: STAGE_FULL, observed: 0, forced: true };     // 强制实际发送
+    if (rc.stageMode === "live") return { stage: STAGE_FULL, observed: 0, forced: true };
+    if (rc.stageMode === "observe") return { stage: STAGE_OBSERVE, observed: 0, forced: true };
+    const key = String(gid);
+    let s = stages.get(key);
+    if (!s) { s = { stage: STAGE_OBSERVE, observed: 0, semiUntil: null, since: nowMs }; stages.set(key, s); }
+    if (s.stage === STAGE_OBSERVE && s.observed >= OBSERVE_UNTIL_MESSAGES) { s.stage = STAGE_SEMI; s.semiUntil = nowMs + SEMI_AUTO_DAYS * 86400000; s.advancedAt = nowMs; }
+    if (s.stage === STAGE_SEMI && s.semiUntil && nowMs >= s.semiUntil) { s.stage = STAGE_FULL; s.advancedAt = nowMs; }
+    return s;
+  }
+
+  function rememberMembers(batch) {
+    const key = String(batch.gid);
+    let m = members.get(key);
+    if (!m) { m = new Map(); members.set(key, m); }
+    for (const e of batch.evts) {
+      const cur = m.get(String(e.uid));
+      if (!cur) m.set(String(e.uid), { speaker: e.speaker, role: e.role || "", firstSeen: e.now, lastSeen: e.now, count: 1 });
+      else { cur.speaker = e.speaker || cur.speaker; cur.role = e.role || cur.role; cur.lastSeen = e.now; cur.count += 1; }
+    }
+    return m;
+  }
+
+  function pushHistory(batch) {
+    const key = String(batch.gid);
+    const arr = history.get(key) || [];
+    for (const e of batch.evts) arr.push({ speaker: e.speaker, text: e.text, at: e.now });
+    const cap = Math.max(0, rc.contextWindow != null ? rc.contextWindow : 10);
+    while (cap && arr.length > cap) arr.shift();
+    history.set(key, arr);
+    return arr;
+  }
+
+  // 上下文块 —— 按 N8 修订，它永远排在 prompt 的最后
+  function contextBlock(gid) {
+    const arr = history.get(String(gid)) || [];
+    if (!arr.length) return "";
+    return "【群里的上下文（越靠下越新）】" + String.fromCharCode(10)
+      + arr.map(function (e) { return (e.speaker ? e.speaker + "：" : "") + e.text; }).join(String.fromCharCode(10));
+  }
 
   async function onEvent(evt) {
     stats.events += 1;
@@ -111,29 +166,51 @@ export function createRuntime(deps) {
     const dec = mergedDec;
     const evt = (anchor && anchor.evt) || mergedEvt;
     const hard = !!(mergedEvt.atBot || mergedEvt.replyToBot);
+    // N8 修订：成员表与上下文窗口在这里更新（成员表初始为空，首见即加）
+    rememberMembers(batch);
+    pushHistory(batch);                     // N8：无论观察还是发送，窗口都要推进
+    const stageState = stageOf(batch.gid, at);
+    stageState.observed += batch.count;
 
     if (!budget.allowReply(hard)) {
       observe({ kind: "budget_block", gid: batch.gid, uid: batch.uid, hard: hard, budget: budget.status() });
       return { gid: batch.gid, action: "budget_block", budget: budget.status() };
     }
 
-    // 观察模式（N9 默认）：只记账，不发送
-    if (rc.observe === true) {
-      observe({ kind: "observe_only", gid: batch.gid, uid: batch.uid, tier: dec.tier, action: dec.action, mergedCount: batch.count });
-      return { gid: batch.gid, action: "observe_only", tier: dec.tier, merged: batch.count };
+    // N9 修订：观察只在新群初期（攒满 OBSERVE_UNTIL_MESSAGES 条），之后半自动、再全自动
+    if (stageState.stage === STAGE_OBSERVE) {
+      observe({ kind: "observe_only", gid: batch.gid, uid: batch.uid, tier: dec.tier, action: dec.action, mergedCount: batch.count, observed: stageState.observed, until: OBSERVE_UNTIL_MESSAGES });
+      return { gid: batch.gid, action: "observe_only", stage: STAGE_OBSERVE, observed: stageState.observed, until: OBSERVE_UNTIL_MESSAGES, tier: dec.tier, merged: batch.count };
+    }
+    if (stageState.stage === STAGE_SEMI && !hard) {
+      observe({ kind: "semi_skip", gid: batch.gid, uid: batch.uid, tier: dec.tier, action: dec.action, mergedCount: batch.count, stage: STAGE_SEMI });
+      return { gid: batch.gid, action: "semi_skip", stage: STAGE_SEMI, merged: batch.count };
     }
 
     let text = "";
     let usage = null;
+    let searchInfo = null;
     if (dec.action === "local_short") {
       text = localReply(dec, { rng: rng });
     } else if (dec.action === "brain") {
       if (!askBrain) return { gid: batch.gid, action: "brain_unavailable" };
       const policy = depthPolicy(dec.tier, { contextWindow: rc.contextWindow });
-      const prompt = buildTaskText(dec.tier, policy, dec.keywords)
-        + String.fromCharCode(10, 10)
-        + "【群里刚刚说的】" + String.fromCharCode(10)
-        + batch.evts.map(function (e) { return e.speaker + "：" + e.text; }).join(String.fromCharCode(10));
+      let taskText = buildTaskText(dec.tier, policy, dec.keywords);
+      // N12：需要搜索时先搜一次，把摘要作为消息体注入（不进系统提示词，前缀缓存不受影响）
+      if (dec.search > 0 && searchSvc) {
+        const sr = await searchSvc.run({ gid: evt.gid, keywords: dec.keywords || [], mode: rc.searchMode, ctx: { evt: evt, decision: dec } });
+        searchInfo = { ok: !!sr.ok, backend: sr.backend || null, cached: !!sr.cached, ms: sr.ms || 0, error: sr.error || null, chars: (sr.summary || "").length };
+        if (sr.ok && sr.summary) taskText = injectSummary(taskText, sr.summary);
+        if (sr.usage) { const st2 = Number(sr.usage.totalTokens) || 0; budget.record(st2, at); stats.tokens += st2; stats.searchTokens += st2; }
+        stats.searches += 1;
+        if (sr.cached) stats.searchCacheHits += 1;
+      }
+      // N8 修订：主体顺序 = 本轮任务 → 搜到的资料 → 上下文窗口（最后）。
+      // 前面只放「本轮任务」这种小而易变的东西，人设仍在 system prompt，缓存前缀不受影响。
+      const blocks = [taskText];
+      const ctxBlock = contextBlock(evt.gid);
+      if (ctxBlock) blocks.push(ctxBlock);
+      const prompt = blocks.filter(Boolean).join(String.fromCharCode(10, 10));
       stats.brainCalls += 1;
       const r = await askBrain({ promptText: prompt, tier: dec.tier, decision: dec, evt: evt });
       usage = r && r.usage ? r.usage : null;
@@ -162,9 +239,9 @@ export function createRuntime(deps) {
     observe({
       kind: "sent", gid: batch.gid, uid: batch.uid, speaker: evt.speaker, tier: dec.tier,
       mergedCount: batch.count, mood: parsed.mood || null, memePending: parsed.mood || null,
-      segments: sent, usage: usage, cacheHitRate: r0(usage)
+      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo
     });
-    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null };
+    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo };
   }
 
   function r0(usage) {
@@ -186,6 +263,9 @@ export function createRuntime(deps) {
   return {
     onEvent: onEvent, tick: tick, status: status,
     coalescer: coalescer, budget: budget, brakes: brakes,
+    members: function (gid) { const m = members.get(String(gid)); return m ? Object.fromEntries(m) : {}; },
+    history: function (gid) { return (history.get(String(gid)) || []).slice(); },
+    stage: function (gid) { return Object.assign({}, stageOf(gid, now())); },
     observe: observe, stats: function () { return Object.assign({}, stats); }
   };
 }

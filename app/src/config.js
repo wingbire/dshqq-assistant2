@@ -85,7 +85,11 @@ export function runtimeConfig(cfg) {
   const c = cfg || {};
   const depthChars = getPath(c, "gates.depthChars") || [20, 60, 200];
   return {
-    observe: getPath(c, "runtime.observe") !== false,   // P1 默认：观察模式
+    // N9 修订：默认 auto —— 新群先观察，攒满 80 条转半自动，3 天后全自动。
+    // 兼容旧语义：runtime.observe=true 强制观察，=false 直接实际发送。
+    stageMode: getPath(c, "runtime.stageMode") || (getPath(c, "runtime.observe") === true ? "observe" : getPath(c, "runtime.observe") === false ? "live" : "auto"),
+    observeUntilMessages: getPath(c, "runtime.observeUntilMessages") != null ? getPath(c, "runtime.observeUntilMessages") : 80,
+    semiAutoDays: getPath(c, "runtime.semiAutoDays") != null ? getPath(c, "runtime.semiAutoDays") : 3,
     contextWindow: getPath(c, "runtime.contextWindow") != null ? getPath(c, "runtime.contextWindow") : 10, // N8
     depthChars: depthChars,
     searchPerTier: getPath(c, "runtime.searchPerTier") || [0, 1, 1],
@@ -104,6 +108,7 @@ export function runtimeConfig(cfg) {
       reconnectMs: getPath(c, "runtime.onebot.reconnectMs") || 3000,
       dedupeWindowMs: getPath(c, "runtime.onebot.dedupeWindowMs") || 180000
     },
+    searchMode: String(getPath(c, "runtime.search.mode") || "c").toLowerCase() === "b" ? "b" : "c",   // N12：B/C 可切换
     autojoinRate: getPath(c, "autojoin.rate") != null ? getPath(c, "autojoin.rate") : 0.25,
     minGapSec: getPath(c, "autojoin.minGapSec") != null ? getPath(c, "autojoin.minGapSec") : 120
   };

@@ -7,7 +7,7 @@ import { createStore } from "../app/src/store.js";
 import { createAddressee } from "../app/src/addressee.js";
 import { parseEvents, buildArgs, brainEnv, cacheHitRate, PROFILE_DEFAULT, DEPTH_POLICY_DEFAULT } from "../app/src/brain.js";
 import { maskKey, parseRefsApiKey, pickApiKey, loadSecrets, saveSecrets } from "../app/src/secrets.js";
-import { buildPersonaText, renderProfilePatch, writeProfilePatch, DEFAULT_PERSONA, PROFILE_ID } from "../app/src/dshprofile.js";
+import { buildPersonaText, renderProfilePatch, writeProfilePatch, writeTierOverlay, renderTierOverlay, writeAllTierOverlays, TIER_EFFORT, DEFAULT_PERSONA, PROFILE_ID } from "../app/src/dshprofile.js";
 import { DATA_ROOT, DSH_HOME, APP_ROOT, BRAIN_TMP_DIR } from "../app/src/paths.js";
 import { splitReply, splitSentences, cutAtSentence } from "../app/src/split.js";
 import { createCoalescer, mergeBucket, pickAnchor } from "../app/src/coalesce.js";
@@ -16,6 +16,9 @@ import { createBrakes, parseAdminCommand, isAdmin } from "../app/src/brakes.js";
 import { createOneBot, normalizeEvent, withToken } from "../app/src/onebot.js";
 import { createRuntime } from "../app/src/runtime.js";
 import { defaultsFromTable, redactConfig, runtimeConfig, setPath, getPath, deepMerge, loadFieldTable } from "../app/src/config.js";
+import { parseAuditVerdict, auditStub, createAuditor, setAuditChannel, audit as runAudit, AUDIT_PROFILE_ID, AUDIT_TIMEOUT_MS } from "../app/src/audit.js";
+import { createSearch, buildSummary, normalizeResults, injectSummary, cacheKeyOf, parseBingHtml, stripTags, httpSearch, SEARCH_PROFILE_ID } from "../app/src/search.js";
+import { DEFAULT_BOUNDS } from "../app/src/gatescore.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -552,7 +555,9 @@ t("config: runtimeConfig 落实 N6/N8/N23 决策", function () {
   const cfg = deepMerge(defaultsFromTable(table), {});
   const rc = runtimeConfig(cfg);
   eq(rc.contextWindow, 10, "N8：进 prompt 的历史 10 条");
-  eq(rc.observe, true, "N9：默认观察模式");
+  eq(rc.stageMode, "auto", "N9 修订：默认走分群阶段机");
+  eq(rc.observeUntilMessages, 80, "N9 修订：新群攒满 80 条即转半自动");
+  eq(rc.semiAutoDays, 3, "N9 修订：半自动默认 3 天后转全自动");
   eq(rc.maxSegments, 3, "N6：最多分 3 条");
   eq(rc.budget.groupHourlyLimit, 0, "N23：取消每群每小时上限");
   eq(rc.budget.dailyTokens, 5000000);
@@ -630,6 +635,310 @@ t("runtime: 预算硬线只回被点名的", async function () {
   await rt.onEvent({ gid: "A", uid: "u2", speaker: "乙", text: "@我 在吗", atBot: true, now: 600 });
   const r2 = await rt.tick(1200);
   eq(r2.results[0].action, "sent");
+});
+
+// ===== P2：外审通道 / 搜索 / 灰区自适应 =====
+
+t("audit: 三态解析，否定优先", function () {
+  eq(parseAuditVerdict("是"), "yes");
+  eq(parseAuditVerdict("是。"), "yes");
+  eq(parseAuditVerdict("否"), "no");
+  eq(parseAuditVerdict("不是"), "no");
+  eq(parseAuditVerdict("不确定"), "unsure");
+  eq(parseAuditVerdict(""), "unsure");
+  eq(parseAuditVerdict("不知道"), "unsure");
+  eq(AUDIT_PROFILE_ID, "qq-audit");
+});
+
+t("audit: 超时/失败一律「不确定」（N11）", async function () {
+  const a = createAuditor({ timeoutMs: 8000, rubric: "r", runner: async function () { return { ok: false, error: "超时 8000ms" }; } });
+  const r = await a("在吗", {});
+  eq(r.verdict, "unsure");
+  eq(r.channel, "brain");
+  eq(AUDIT_TIMEOUT_MS, 8000);
+});
+
+t("audit: 真实通道返回被解析；装通道后 audit() 走真实通道", async function () {
+  const calls = [];
+  const a = createAuditor({ rubric: "r", runner: async function (req) { calls.push(req); return { ok: true, text: "否" }; } });
+  eq((await a("他说这个副本要打三遍", {})).verdict, "no");
+  eq(calls.length, 1);
+  eq(calls[0].profile, "qq-audit");
+  ok(calls[0].personaText === "r", "rubric 应作为该 profile 的人设传入");
+  const names = [];
+  const a2 = createAuditor({ rubric: "r", runner: async function (req) { names.push(req.promptText); return { ok: true, text: "是" }; } });
+  await a2("这个报错怎么解", { botNames: ["小肥鱼"], nicknames: ["肥鱼"] });
+  ok(names[0].includes("小肥鱼"), "外审提示词必须带上小助手的名字，否则点名会被误判");
+  setAuditChannel(a);
+  eq((await runAudit("在吗", {})).verdict, "no");
+  setAuditChannel(null);
+  eq((await runAudit("他说这个副本要打三遍", { botNames: ["小肥鱼"] })).verdict, "no", "没有通道时应退回规则桩");
+});
+
+t("audit: 规则桩的三态仍可用", function () {
+  eq(auditStub("小肥鱼 在吗", { botNames: ["小肥鱼"] }).verdict, "yes");
+  eq(auditStub("他说这个副本要打三遍", { botNames: ["小肥鱼"] }).verdict, "no");
+  eq(auditStub("嗯", {}).verdict, "unsure");
+});
+
+t("search: normalizeResults 吃多种返回形状", function () {
+  eq(normalizeResults([{ title: "a", snippet: "b" }], 3).length, 1);
+  eq(normalizeResults({ sources: [{ title: "a", url: "u" }] }, 3)[0].url, "u");
+  eq(normalizeResults({ results: ["纯文本"] }, 3)[0].snippet, "纯文本");
+  eq(normalizeResults(null, 3).length, 0);
+  eq(normalizeResults([{ title: "a" }, { title: "b" }, { title: "c" }], 2).length, 2);
+});
+
+t("search: 摘要截断到上限", function () {
+  const long = [{ title: "标题", snippet: "字".repeat(600) }];
+  const s = buildSummary(long, 500);
+  eq(s.length, 500);
+  ok(s.endsWith("…"));
+  eq(buildSummary([{ title: "A", snippet: "aaa" }], 100), "A：aaa");
+});
+
+t("search: 没有关键词不搜", async function () {
+  const s = createSearch({ mode: "c", freeSearch: {}, httpSearch: async function () { throw new Error("不该被调用"); } });
+  const r = await s.run({ gid: "A", keywords: [] });
+  eq(r.ok, false);
+  eq(s.stats().calls, 0);
+});
+
+t("search: 缓存命中且与关键词顺序无关，TTL 到期失效", async function () {
+  let t = 1000, n = 0;
+  const s = createSearch({
+    mode: "c", now: function () { return t; }, ttlMs: 300000,
+    freeSearch: null,
+    httpSearch: async function () { n += 1; return { ok: true, items: [{ title: "t", snippet: "s" }], engine: "test" }; }
+  });
+  const r1 = await s.run({ gid: "A", keywords: ["甲", "乙"] });
+  eq(r1.cached, false);
+  const r2 = await s.run({ gid: "A", keywords: ["乙", "甲"] });
+  eq(r2.cached, true);
+  eq(n, 1, "只应真搜一次");
+  t += 300001;
+  await s.run({ gid: "A", keywords: ["甲", "乙"] });
+  eq(n, 2, "过期后应重搜");
+  eq(s.stats().hits, 1);
+});
+
+t("search: C 失败自动退到 B", async function () {
+  const s = createSearch({
+    mode: "c", now: function () { return 0; },
+    freeSearch: null,
+    httpSearch: async function () { return { ok: false, error: "直连失败" }; },
+    brainSearch: async function () { return { ok: true, summary: "B 通道给的摘要", usage: { totalTokens: 1200 } }; }
+  });
+  const r = await s.run({ gid: "A", keywords: ["关键词"] });
+  eq(r.ok, true);
+  eq(r.backend, "b");
+  eq(r.summary, "B 通道给的摘要");
+  eq(r.usage.totalTokens, 1200);
+});
+
+t("search: B 摘要超长被截断到 500", async function () {
+  const s = createSearch({
+    mode: "b", now: function () { return 0; }, freeSearch: null,
+    brainSearch: async function () { return { ok: true, summary: "字".repeat(900) }; }
+  });
+  const r = await s.run({ gid: "A", keywords: ["x"] });
+  eq(r.summary.length, 500);
+});
+
+t("search: injectSummary 保留任务文本并标注不可信", function () {
+  const base = "【本轮任务】档位：总结";
+  const out = injectSummary(base, "资料摘要");
+  ok(out.startsWith(base), "任务文本本体不能被改写");
+  ok(out.includes("资料摘要"));
+  ok(out.includes("不可信"));
+  eq(injectSummary(base, ""), base);
+});
+
+t("search: Bing 页面解析与去标签", function () {
+  const html = '<li class="b_algo"><h2><a href="https://x">标题<b>加粗</b></a></h2><p>片段 &amp; 更多</p></li>';
+  const items = parseBingHtml(html, 3);
+  eq(items.length, 1);
+  eq(items[0].title, "标题 加粗");
+  eq(items[0].snippet, "片段 & 更多");
+  eq(stripTags("<a>甲</a>&nbsp;乙"), "甲 乙");
+  eq(cacheKeyOf("A", ["b", "a"], "c"), "c|A|a,b");
+});
+
+t("gatescore: N14 灰区边界定型为 0.30~0.85", function () {
+  eq(DEFAULT_BOUNDS.loMin, 0.30);
+  eq(DEFAULT_BOUNDS.hiMax, 0.85);
+  eq(DEFAULT_BOUNDS.step, 0.02);
+});
+
+t("gatescore: adaptBounds 单向调整且不越界", function () {
+  const lo = adaptBounds({ lo: 0.40, hi: 0.75 }, { missedRate: 0.5, auditFlipRate: 0 });
+  eq(lo.lo, 0.38, "漏接多 → 下界往下走一步");
+  const many = adaptBounds({ lo: 0.31, hi: 0.75 }, { missedRate: 0.9, auditFlipRate: 0 });
+  ok(many.lo >= 0.30, "不能越过 loMin");
+  const hi = adaptBounds({ lo: 0.40, hi: 0.75 }, { missedRate: 0, auditFlipRate: 0.9 });
+  eq(hi.hi, 0.73, "翻转多 → 上界往下走一步");
+  const hi2 = adaptBounds({ lo: 0.40, hi: 0.84 }, { missedRate: 0, auditFlipRate: 0.9 });
+  ok(hi2.hi <= 0.85, "不能越过 hiMax");
+});
+
+t("config: runtimeConfig 暴露 N12 的搜索通道开关", function () {
+  const table = loadFieldTable();
+  eq(runtimeConfig(defaultsFromTable(table)).searchMode, "c");
+  const b = deepMerge(defaultsFromTable(table), { runtime: { search: { mode: "B" } } });
+  eq(runtimeConfig(b).searchMode, "b");
+});
+
+t("runtime: 需要搜索时先搜再注入，搜索失败不阻塞回复", async function () {
+  const sent = []; const prompts = []; const observed = [];
+  const searchCalls = [];
+  const fakeSearch = {
+    run: async function (req) { searchCalls.push(req); return { ok: true, summary: "搜到的资料摘要", backend: "c", cached: false, ms: 12, usage: null }; }
+  };
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 100, searchMode: "c" },
+    store: { addObservation: function (r) { observed.push(r); } },
+    bot: fakeBot({ tier: "high", maxChars: 200, search: 1, keywords: ["报错"] }),
+    search: fakeSearch,
+    send: function (g, t) { sent.push(t); },
+    askBrain: async function (o) { prompts.push(o.promptText); return { ok: true, text: "答案", usage: { totalTokens: 10 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "这个报错怎么解", now: 0 });
+  const r = await rt.tick(500);
+  eq(searchCalls.length, 1, "应搜一次");
+  eq(r.results[0].surface === undefined ? r.results[0].search.backend : null, "c");
+  ok(prompts[0].includes("搜到的资料摘要"), "摘要应注入到本轮任务");
+  eq(rt.stats().searches, 1);
+  ok(observed.some(function (x) { return x.kind === "sent" && x.search && x.search.ok; }));
+});
+
+t("runtime: 搜索失败也要照样回复", async function () {
+  const sent = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 100 },
+    store: { addObservation: function () {} },
+    bot: fakeBot({ tier: "high", maxChars: 200, search: 1, keywords: ["x"] }),
+    search: { run: async function () { return { ok: false, error: "搜不动" }; } },
+    send: function (g, t) { sent.push(t); },
+    askBrain: async function () { return { ok: true, text: "照常回答", usage: { totalTokens: 5 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "问题", now: 0 });
+  const r = await rt.tick(500);
+  eq(r.results[0].action, "sent");
+  eq(sent[0], "照常回答");
+  eq(r.results[0].search.ok, false);
+});
+
+t("dshprofile: 三档 overlay 只改推理档、不碰人设", function () {
+  const low = JSON.parse(renderTierOverlay("low"))[0];
+  eq(low.id, "agent-default-model");
+  eq(low.config.reasoningEffort, "off");
+  eq(JSON.parse(renderTierOverlay("mid"))[0].config.reasoningEffort, "low");
+  eq(JSON.parse(renderTierOverlay("high"))[0].config.reasoningEffort, "high");
+  eq(TIER_EFFORT.high, "high");
+  ok(renderTierOverlay("high").indexOf("persona") < 0, "overlay 里不能出现人设，否则各档缓存会分裂");
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "tier-" + Date.now());
+  const files = writeAllTierOverlays(dir, "qq-brain");
+  ok(fs.existsSync(files.high));
+  eq(JSON.parse(fs.readFileSync(files.mid, "utf8"))[0].config.reasoningEffort, "low");
+});
+
+t("brain: --patch 必须排在 app 名之前", function () {
+  const args = buildArgs({ launch: { cliJs: "C:/x/cli.js" }, profile: "qq-brain", appName: "headless", promptText: "在吗", patchFiles: ["C:/t/high.patch.yml"] });
+  ok(args.indexOf("--patch") > args.indexOf("--profile"), "patch 在 profile 之后");
+  ok(args.indexOf("--patch") < args.indexOf("headless"), "patch 必须在 app 名之前");
+  eq(args[args.indexOf("--patch") + 1], "C:/t/high.patch.yml");
+  eq(args[args.length - 1], "在吗");
+});
+
+// ===== N8 / N9 修订 =====
+
+function baseRt(extraRuntime, extraDeps) {
+  const seen = { sent: [], prompts: [], obs: [] };
+  const rt = createRuntime(Object.assign({
+    config: {}, runtime: Object.assign({ coalesceWindowMs: 100, contextWindow: 10 }, extraRuntime || {}),
+    store: { addObservation: function (r) { seen.obs.push(r); } },
+    bot: fakeBot(),
+    send: function (g, t) { seen.sent.push(t); },
+    askBrain: async function (o) { seen.prompts.push(o.promptText); return { ok: true, text: "答案", usage: { totalTokens: 1 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  }, extraDeps || {}));
+  return { rt: rt, seen: seen };
+}
+
+t("N8：上下文窗口块排在 prompt 最后", async function () {
+  const { rt, seen } = baseRt({ observe: false, contextWindow: 10 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "第一句", now: 0 });
+  await rt.tick(500);
+  const p = seen.prompts[0];
+  ok(p.indexOf("【本轮任务】") >= 0, "应有本轮任务");
+  const iTask = p.lastIndexOf("【本轮任务】");
+  const iCtx = p.lastIndexOf("【群里的上下文");
+  ok(iCtx > iTask, "上下文块必须在任务之后");
+  ok(p.trim().endsWith("甲：第一句"), "prompt 应以最新的群消息收尾，实得：" + JSON.stringify(p.slice(-40)));
+});
+
+t("N8：成员表初始为空，首次收到消息才加人", async function () {
+  const { rt } = baseRt({ observe: true });
+  eq(Object.keys(rt.members("A")).length, 0, "进群时成员表必须为空（不再全量拉成员）");
+  await rt.onEvent({ gid: "A", uid: "2001", speaker: "甲", text: "在吗", now: 0 });
+  await rt.tick(500);
+  const m = rt.members("A");
+  eq(Object.keys(m).length, 1);
+  eq(m["2001"].speaker, "甲");
+  eq(m["2001"].count, 1);
+});
+
+t("N8：历史窗口只保留最近 N 条", async function () {
+  const { rt } = baseRt({ observe: true, contextWindow: 2 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "一", now: 0 });
+  await rt.tick(500);
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "二", now: 600 });
+  await rt.tick(1200);
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "三", now: 1300 });
+  await rt.tick(2000);
+  const h = rt.history("A");
+  eq(h.length, 2);
+  eq(h[0].text, "二");
+  eq(h[1].text, "三");
+});
+
+t("N9：新群先观察，攒满 80 条才转半自动", async function () {
+  const { rt, seen } = baseRt({ stageMode: "auto", observeUntilMessages: 2, semiAutoDays: 3 });
+  eq(rt.stage("A").stage, "observe");
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "话一", now: 0 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "话二", now: 50 });
+  const r1 = await rt.tick(500);
+  eq(r1.results[0].action, "observe_only", "初期只观察，不发送");
+  eq(seen.sent.length, 0);
+  eq(rt.stage("A").observed, 2);
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "话三", now: 600 });
+  const r2 = await rt.tick(1200);
+  eq(r2.results[0].action, "semi_skip", "半自动期：没被点名就不插话，实得 " + r2.results[0].action);
+  eq(rt.stage("A").stage, "semi");
+});
+
+t("N9：半自动期满转全自动，能主动开口", async function () {
+  const { rt, seen } = baseRt({ stageMode: "auto", observeUntilMessages: 1, semiAutoDays: 0 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "话一", now: 0 });
+  await rt.tick(500);
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "话二", now: 600 });
+  const r = await rt.tick(1200);
+  eq(rt.stage("A").stage, "full");
+  eq(r.results[0].action, "sent");
+  eq(seen.sent.length, 1);
+});
+
+t("N9：被点名时半自动照常回", async function () {
+  const { rt, seen } = baseRt({ stageMode: "auto", observeUntilMessages: 1, semiAutoDays: 5 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "话一", now: 0 });
+  await rt.tick(500);
+  await rt.onEvent({ gid: "A", uid: "u2", speaker: "乙", text: "小肥鱼 在吗", atBot: true, now: 600 });
+  const r = await rt.tick(1200);
+  eq(rt.stage("A").stage, "semi");
+  eq(r.results[0].action, "sent");
+  eq(seen.sent.length, 1);
 });
 
 await Promise.all(pendingTests);

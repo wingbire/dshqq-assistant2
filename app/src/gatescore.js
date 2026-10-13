@@ -1,4 +1,5 @@
-export const DEFAULT_BOUNDS = { lo: 0.40, hi: 0.75, loMin: 0.25, loMax: 0.60, hiMin: 0.60, hiMax: 0.92, step: 0.02 };
+// N14 定型：灰区上下界在 0.30~0.85 之间按步长 0.02 自适应，每 refN(20) 次调一次。
+export const DEFAULT_BOUNDS = { lo: 0.40, hi: 0.75, loMin: 0.30, loMax: 0.60, hiMin: 0.60, hiMax: 0.85, step: 0.02 };
 
 export function clampBounds(b) {
   const d = Object.assign({}, DEFAULT_BOUNDS, b || {});

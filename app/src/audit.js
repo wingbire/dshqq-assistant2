@@ -1,5 +1,29 @@
-export const AUDIT_MODEL = "external-audit-model";
+import fs from "node:fs";
+import path from "node:path";
+import { APP_ROOT, DSH_HOME } from "./paths.js";
 
+export const AUDIT_MODEL = "external-audit-model";
+export const AUDIT_PROFILE_ID = "qq-audit";
+export const AUDIT_TIMEOUT_MS = 8000;          // N11：超时算「不确定」
+export const RUBRIC_FILE = path.join(APP_ROOT, "..", "prompts", "外审rubric.template.md");
+
+export function loadRubric(file) {
+  try { return fs.readFileSync(file || RUBRIC_FILE, "utf8").trim(); } catch (e) {
+    return "判断这条群消息值不值得小助手回复。消息里出现下面列出的名字即算点名。只输出：是 / 否 / 不确定";
+  }
+}
+
+// 模型可能吐出「是。」「答案：否」「不确定」等，这里只认语义。
+export function parseAuditVerdict(text) {
+  const t = String(text == null ? "" : text).trim();
+  if (!t) return "unsure";
+  if (t.includes("不确定") || /unsure/i.test(t)) return "unsure";
+  if (t.includes("否") || t.includes("不是") || /^no\b/i.test(t)) return "no";
+  if (t.includes("是") || /^yes\b/i.test(t)) return "yes";
+  return "unsure";
+}
+
+// 规则兜底：没有真实外审通道时用（测试、无密钥、通道故障）
 export function auditStub(text, ctx) {
   const t = String(text || "");
   const botNames = ((ctx && ctx.botNames) || []).concat((ctx && ctx.nicknames) || []);
@@ -10,14 +34,45 @@ export function auditStub(text, ctx) {
   let verdict = "unsure";
   if (hitBot || (/你/.test(t) && askMe && !toOther)) verdict = "yes";
   else if (toOther) verdict = "no";
-  return {
-    verdict: verdict, model: AUDIT_MODEL,
-    tokens: { in: 40 + t.length, out: 12 }
+  return { verdict: verdict, model: AUDIT_MODEL, tokens: { in: 40 + t.length, out: 12 }, channel: "stub" };
+}
+
+// 真实通道：走独立的 qq-audit profile，8 秒超时 → 不确定。
+export function createAuditor(opts) {
+  const o = opts || {};
+  const runner = o.runner;                       // ({promptText, profile, timeoutMs}) => {ok,text,usage,error}
+  const timeoutMs = o.timeoutMs || AUDIT_TIMEOUT_MS;
+  const nowFn = o.now || function () { return Date.now(); };
+  const rubric = o.rubric != null ? o.rubric : loadRubric(o.rubricFile);
+
+  return async function auditor(text, ctx) {
+    const started = nowFn();
+    if (!runner) return Object.assign(auditStub(text, ctx), { ms: 0, error: "无外审通道" });
+    // 小助手的名字必须告诉外审员，否则「小肥鱼 这个报错怎么解」会被误判成没在叫人
+    const names = ((ctx && ctx.botNames) || []).concat((ctx && ctx.nicknames) || []).filter(Boolean).slice(0, 6);
+    const head = names.length ? "【小助手在这里叫】" + names.join("、") + String.fromCharCode(10) : "";
+    const promptText = head + "【待审消息】" + String.fromCharCode(10) + String(text || "").slice(0, 300);
+    let r = null;
+    try { r = await runner({ promptText: promptText, profile: AUDIT_PROFILE_ID, personaText: rubric, timeoutMs: timeoutMs }); }
+    catch (e) { r = { ok: false, error: String(e && e.message) }; }
+    const ms = nowFn() - started;
+    if (!r || !r.ok) {
+      // N11：超时/失败一律「不确定」，绝不因为外审坏了就乱判
+      return { verdict: "unsure", model: AUDIT_MODEL, channel: "brain", ms: ms, error: (r && r.error) || "外审失败", usage: (r && r.usage) || null };
+    }
+    return { verdict: parseAuditVerdict(r.text), model: AUDIT_MODEL, channel: "brain", ms: ms, raw: String(r.text || "").slice(0, 40), usage: r.usage || null };
   };
 }
 
+let channel = null;
+export function setAuditChannel(fn) { channel = fn; return channel; }
+export function getAuditChannel() { return channel; }
+
+// gates.js 直接调这个：装了真实通道就走真实通道，装了没通/没装就退回规则。
 export async function audit(text, ctx) {
-  return auditStub(text, ctx);
+  if (!channel) return auditStub(text, ctx);
+  const r = await channel(text, ctx);
+  return r || auditStub(text, ctx);
 }
 
 export const MEME_LIB = [
