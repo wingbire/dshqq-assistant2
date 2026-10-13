@@ -85,6 +85,8 @@ const runtime = createRuntime({
 if (selftest) {
   const st = runtime.status();
   log("自检通过：" + JSON.stringify({ mode: st.mode, onebotState: ob.state(), config: redactConfig(cfg, table).runtime || null }));
+  const ls = runtime.labelStatus();
+  log("学习：待标注 " + (ls ? ls.pending : 0) + " 条 / 已标注 " + (ls ? ls.labeled : 0) + " 条（满 " + (ls ? ls.minSamples : 30) + " 条自动回流标定）");
   log("配置片断：" + JSON.stringify({ persona: redactConfig(cfg, table).persona, napcat: redactConfig(cfg, table).napcat }));
   process.exit(0);
 }
@@ -92,7 +94,10 @@ if (selftest) {
 ob.connect();
 const timer = setInterval(function () { runtime.tick().catch(function (e) { log("tick 失败：" + e.message); }); }, tickMs);
 if (timer.unref) timer.unref();
-setInterval(function () { log("状态 " + JSON.stringify(runtime.status().stats)); }, 30000);
+setInterval(function () {
+  const s = runtime.status();
+  log("状态 " + JSON.stringify(Object.assign({}, s.stats, { 待定反馈: runtime.pendingFeedback(), 预算: s.budget.mode, 阶段: "按群" })));
+}, 30000);
 
 process.on("SIGINT", function () {
   log("收到 SIGINT，收尾中…");

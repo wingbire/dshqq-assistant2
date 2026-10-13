@@ -19,6 +19,9 @@ import { defaultsFromTable, redactConfig, runtimeConfig, setPath, getPath, deepM
 import { parseAuditVerdict, auditStub, createAuditor, setAuditChannel, audit as runAudit, AUDIT_PROFILE_ID, AUDIT_TIMEOUT_MS } from "../app/src/audit.js";
 import { createSearch, buildSummary, normalizeResults, injectSummary, cacheKeyOf, parseBingHtml, stripTags, httpSearch, SEARCH_PROFILE_ID } from "../app/src/search.js";
 import { DEFAULT_BOUNDS } from "../app/src/gatescore.js";
+import { createTracker, isAnnoyed, calledBot } from "../app/src/feedback.js";
+import { createLabelQueue, foldLabels, pendingOf, labeledOf, agreementStats, shortHash } from "../app/src/label.js";
+import { buildProfilePrompt } from "../app/src/profile.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -941,6 +944,229 @@ t("N9：被点名时半自动照常回", async function () {
   eq(seen.sent.length, 1);
 });
 
+// ===== P3：学习闭环与标定 =====
+
+t("feedback: 同一个人接着说 → continued_with_bot", function () {
+  const tr = createTracker({ windowMs: 90000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0, botNames: ["小肥鱼"] });
+  const out = tr.resolve({ gid: "A", uid: "u1", text: "再讲讲", now: 100 });
+  eq(out.length, 1);
+  eq(out[0].outcome, "continued_with_bot");
+  eq(out[0].nickCall, false);
+  eq(tr.pendingCount(), 0);
+});
+
+t("feedback: 接着聊并叫外号 → nickCall（engagement +4）", function () {
+  const tr = createTracker({ windowMs: 90000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0, botNames: ["小肥鱼", "肥鱼"] });
+  const out = tr.resolve({ gid: "A", uid: "u1", text: "小肥鱼你继续说", now: 50 });
+  eq(out[0].outcome, "continued_with_bot");
+  eq(out[0].nickCall, true);
+  eq(engagementOf(out[0]), 4);
+});
+
+t("feedback: 换人说话 → went_to_others", function () {
+  const tr = createTracker({ windowMs: 90000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0 });
+  const out = tr.resolve({ gid: "A", uid: "u2", text: "对了那个副本", now: 10 });
+  eq(out[0].outcome, "went_to_others");
+  eq(engagementOf(out[0]), -1);
+});
+
+t("feedback: 嫌烦 → annoyed", function () {
+  const tr = createTracker({ windowMs: 90000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0 });
+  const out = tr.resolve({ gid: "A", uid: "u1", text: "别说了行不行", now: 10 });
+  eq(out[0].outcome, "annoyed");
+  eq(engagementOf(out[0]), -2);
+});
+
+t("feedback: 窗口内没人接 → no_one_replied（弱负）", function () {
+  const tr = createTracker({ windowMs: 1000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0 });
+  eq(tr.sweep(500).length, 0, "还没到期");
+  const out = tr.sweep(1000);
+  eq(out.length, 1);
+  eq(out[0].outcome, "no_one_replied");
+  eq(engagementOf(out[0]), 0);
+});
+
+t("feedback: 过了窗口才有人说话也算没人接", function () {
+  const tr = createTracker({ windowMs: 1000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0 });
+  const out = tr.resolve({ gid: "A", uid: "u1", text: "嗯", now: 5000 });
+  eq(out[0].outcome, "no_one_replied");
+});
+
+t("feedback: 群之间互不干扰", function () {
+  const tr = createTracker({ windowMs: 90000 });
+  tr.noteReply({ gid: "A", uid: "u1", at: 0 });
+  tr.noteReply({ gid: "B", uid: "u1", at: 0 });
+  eq(tr.resolve({ gid: "A", uid: "u1", text: "接着说", now: 10 }).length, 1);
+  eq(tr.pendingCount(), 1, "B 群的还挂着");
+});
+
+t("score: reward = engagement − λ·成本", function () {
+  const ev = { outcome: "continued_with_bot", nickCall: false, inTokens: 100, outTokens: 50 };
+  eq(reward(ev, { lambda: 1 }, 1000), 2 - (100 + 100) / 1000);
+  const cost = reward({ outcome: "no_one_replied", inTokens: 900, outTokens: 300 }, { lambda: 1 }, 900);
+  ok(cost < 0, "成本高、又没人接，reward 应为负");
+});
+
+t("label: 同一 id 取最后一条；pending 与 labeled 分流", function () {
+  const rows = [
+    { id: "A:1", human: null, localVerdict: "grey" },
+    { id: "A:1", human: "该回" },
+    { id: "A:2", human: null, localVerdict: "no" }
+  ];
+  const folded = foldLabels(rows);
+  eq(folded.length, 2);
+  eq(pendingOf(rows).length, 1);
+  eq(labeledOf(rows).length, 1);
+});
+
+t("label: agreementStats 统计漏接率与灰区噪声", function () {
+  const rows = [
+    { id: "1", human: "该回", localVerdict: "no" },
+    { id: "2", human: "该回", localVerdict: "yes" },
+    { id: "3", human: "不该回", localVerdict: "grey" },
+    { id: "4", human: "不该回", localVerdict: "no" }
+  ];
+  const s = agreementStats(rows);
+  eq(s.n, 4);
+  eq(s.missedRate, 0.5);
+  eq(s.flipRate, 0.5);
+  eq(s.agreement, 0.5);
+});
+
+t("label: 不满 30 条不回流，满了就回流并给出新边界", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "label-" + Date.now());
+  const store = createStore(path.join(dir, "data"));
+  const q = createLabelQueue({ store: store, minSamples: 3 });
+  eq(q.capable, true);
+  q.recordCandidate({ gid: "A", messageId: "1", text: "在吗", localVerdict: "no", localAction: "ignore" });
+  eq(q.status().pending, 1);
+  eq(q.reflowIfReady({ lo: 0.4, hi: 0.75 }, 0).ready, false, "样本不够不回流");
+  q.label("A:1", "该回");
+  q.recordCandidate({ gid: "A", messageId: "2", localVerdict: "no" }); q.label("A:2", "该回");
+  q.recordCandidate({ gid: "A", messageId: "3", localVerdict: "no" }); q.label("A:3", "该回");
+  const r = q.reflowIfReady({ lo: 0.4, hi: 0.75 }, 1);
+  eq(r.ready, true);
+  eq(r.n, 3);
+  eq(r.stats.missedRate, 1, "三条全被判否、人工都说该回");
+  ok(r.bounds.lo < 0.4, "漏接多 → 下界应下调，实得 " + r.bounds.lo);
+});
+
+t("label: store 不支持标注时给空实现，不抛", function () {
+  const q = createLabelQueue({ store: { addObservation: function () {} } });
+  eq(q.capable, false);
+  eq(q.recordCandidate({}), null);
+  eq(q.status().pending, 0);
+  eq(q.reflowIfReady({}, 0).ready, false);
+});
+
+t("runtime: 回复后登记待定反馈，同一人接着说记为 continued", async function () {
+  let clock = 0;
+  const observed = [];
+  const settled = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: { addObservation: function (r) { observed.push(r); } },
+    bot: Object.assign(fakeBot(), { observe: function (rec) { settled.push(rec); return { refit: false }; }, profilePrompt: function () { return ""; } }),
+    evtDefaults: { botNames: ["小肥鱼"] },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "好的。", usage: { inputTokens: 10, outputTokens: 2 } }; },
+    now: function () { return clock; }, sleep: async function () {}, sendGapMs: 0
+  });
+  clock = 0;
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "小肥鱼 讲讲游戏", atBot: true, now: 0 });
+  clock = 100; await rt.tick(100);
+  eq(rt.pendingFeedback(), 1, "发完应挂一条待定反馈");
+  clock = 200;
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "再讲讲", now: 200 });
+  eq(rt.pendingFeedback(), 0);
+  eq(settled.length, 1);
+  eq(settled[0].outcome, "continued_with_bot");
+  eq(settled[0].uid, "u1");
+  eq(rt.stats().feedbackResolved, 1);
+});
+
+t("runtime: 换人说话记为 went_to_others", async function () {
+  let clock = 0;
+  const settled = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: { addObservation: function () {} },
+    bot: Object.assign(fakeBot(), { observe: function (rec) { settled.push(rec); return { refit: false }; }, profilePrompt: function () { return ""; } }),
+    evtDefaults: { botNames: ["小肥鱼"] },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "嗯。", usage: { inputTokens: 10, outputTokens: 2 } }; },
+    now: function () { return clock; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "小肥鱼 在吗", atBot: true, now: 0 });
+  clock = 100; await rt.tick(100);
+  clock = 200;
+  await rt.onEvent({ gid: "A", uid: "u2", speaker: "乙", text: "对了那个副本怎么打", now: 200 });
+  eq(settled[0].outcome, "went_to_others");
+});
+
+t("runtime: 观察期把判定记成待标注候选（N21）", async function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "obs-" + Date.now());
+  const store = createStore(path.join(dir, "data"));
+  const rt = createRuntime({
+    config: {}, runtime: { observe: true, coalesceWindowMs: 50 },
+    store: store, bot: fakeBot(),
+    send: function () {}, askBrain: async function () { return { ok: true, text: "x" }; },
+    now: function () { return 0; }, sleep: async function () {}
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "这个报错怎么解", now: 0 });
+  await rt.tick(100);
+  const rows = store.readJsonl(store.paths.labels);
+  eq(rows.length, 1);
+  eq(rows[0].human, null);
+  ok(/^A:.+/.test(rows[0].id), "待标注行要有稳定 id，实得 " + rows[0].id);
+  eq(rows[0].id, "A:" + shortHash("这个报错怎么解"));
+  ok(rows[0].localVerdict);
+  eq(rt.stats().labelCandidates, 1);
+});
+
+t("runtime: 合并判定不再重复 learn（修 IDF 学两次）", async function () {
+  const calls = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: { addObservation: function () {} },
+    bot: { handleEvent: async function (evt, opts) { calls.push(!!(opts && opts.learn === false)); return { action: "brain", verdict: "yes", pSay: 0.9, U: 0.5, tier: "mid", maxChars: 60, search: 0, keywords: [], bucket: "question", arm: "terse", reason: [], injected: false }; }, observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; } },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "好。", usage: { inputTokens: 1, outputTokens: 1 } }; },
+    now: function () { return 0; }, sleep: async function () {}
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "一", now: 0 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "二", now: 10 });
+  await rt.tick(200);
+  eq(calls.length, 3, "两条逐条判定 + 一次合并判定");
+  eq(calls[0], false);
+  eq(calls[1], false);
+  eq(calls[2], true, "合并判定必须 learn:false");
+});
+
+t("runtime: 群档案块进 prompt，且仍在上下文之前", async function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "prof-prompt-" + Date.now());
+  const store = createStore(path.join(dir, "data"));
+  store.saveProfile("A", { interests: ["报错", "游戏"], rounds: 1, habits: "句短" });
+  const prompts = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: store,
+    bot: Object.assign(fakeBot(), { profilePrompt: function (gid) { return buildProfilePrompt(store.loadProfile(gid) || {}); }, observe: function () { return { refit: false }; } }),
+    send: function () {}, askBrain: async function (o) { prompts.push(o.promptText); return { ok: true, text: "好。", usage: { inputTokens: 1, outputTokens: 1 } }; },
+    now: function () { return 0; }, sleep: async function () {}
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "在吗", now: 0 });
+  await rt.tick(100);
+  const p = prompts[0];
+  ok(p.includes("【本群画像】"), "应带群档案");
+  ok(p.includes("报错"), "应带群兴趣");
+  ok(p.indexOf("【本群画像】") < p.indexOf("【群里的上下文"), "群档案要在上下文之前");
+});
+
+// === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===
 await Promise.all(pendingTests);
 console.log("=== 骨架回归测试 ===");
 console.log("通过 " + pass + " 项，失败 " + fails.length + " 项");

@@ -6,6 +6,8 @@ import { localReply } from "./localreply.js";
 import { depthPolicy, buildTaskText } from "./brain.js";
 import { parseMeme } from "./audit.js";
 import { injectSummary } from "./search.js";
+import { createTracker } from "./feedback.js";
+import { createLabelQueue } from "./label.js";
 
 // P1 接入层装配。所有外部副作用（send / askBrain / now / rng / store）都可注入，
 // 所以整套流程能在没有 QQ、没有模型的情况下被测试。
@@ -32,11 +34,14 @@ export function createRuntime(deps) {
   const history = new Map();                    // gid -> [{ speaker, text, at }]  最多 contextWindow 条
   // N9（修订）：观察只在新群初期，攒满 observeUntilMessages 条后进半自动，semiAutoDays 天后全自动
   const stages = new Map();                     // gid -> { stage, observed, semiUntil, since }
+  // P3：反馈归因（按被回复人是否继续跟我聊）+ 人工标注队列
+  const tracker = d.tracker || createTracker({ windowMs: rc.feedbackWindowMs != null ? rc.feedbackWindowMs : 90000 });
+  const labels = d.labels || (store ? createLabelQueue({ store: store, minSamples: rc.labelMinSamples || 30 }) : null);
   const coalescer = createCoalescer({ windowMs: rc.coalesceWindowMs, maxBatch: rc.coalesceMaxBatch });
   const budget = d.budget || createBudget({ limits: rc.budget, now: now });
   const brakes = d.brakes || createBrakes({ config: cfg, now: now });
 
-  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0 };
+  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0 };
   let busy = false;
 
   function observe(rec) {
@@ -45,6 +50,39 @@ export function createRuntime(deps) {
   }
 
   function adminConfig() { return cfg.admin || {}; }
+
+  function settle(records, atMs) {
+    const list = records || [];
+    for (const rec of list) {
+      stats.feedbackResolved += 1;
+      let r = null;
+      try { r = bot.observe(rec); } catch (e) { r = null; }
+      if (r && r.refit) {
+        stats.refits += 1;
+        let reflow = null;
+        if (labels) {
+          const cur = bot.getBounds ? bot.getBounds() : null;
+          reflow = labels.reflowIfReady(cur, atMs);
+          if (reflow.ready && reflow.changed && bot.setBounds) bot.setBounds(reflow.bounds);
+        }
+        observe({
+          kind: "refit", gid: rec.gid,
+          bounds: bot.getBounds ? bot.getBounds() : null,
+          rounds: r.profile && r.profile.rounds, flipRate: r.flipRate, missedRate: r.missedRate,
+          reflow: reflow ? { ready: !!reflow.ready, n: reflow.n, changed: !!reflow.changed } : null
+        });
+      }
+    }
+    return list.length;
+  }
+
+  // N8：群档案排在「本轮任务」之后、上下文之前 —— 它每 refN 次才变一次
+  function profileBlock(gid) {
+    if (!store || typeof store.loadProfile !== "function" || !bot.profilePrompt) return "";
+    const prof = store.loadProfile(gid);
+    if (!prof || !(prof.rounds > 0)) return "";
+    return bot.profilePrompt(gid);
+  }
 
   const STAGE_OBSERVE = "observe", STAGE_SEMI = "semi", STAGE_FULL = "full";
   const OBSERVE_UNTIL_MESSAGES = rc.observeUntilMessages != null ? rc.observeUntilMessages : 80;   // N9
@@ -95,6 +133,8 @@ export function createRuntime(deps) {
 
   async function onEvent(evt) {
     stats.events += 1;
+    // P3：这条消息同时是「上一条回复」的判决书 —— 先结算
+    settle(tracker.resolve(evt), evt.now);
     const st = brakes.state(evt.gid, evt.now);
     if (st.stopped) { stats.stopped += 1; return { action: "stopped", reason: st.reason }; }
 
@@ -124,6 +164,7 @@ export function createRuntime(deps) {
   async function tick(t) {
     const at = t == null ? now() : t;
     if (busy) return { skipped: "busy" };
+    settle(tracker.sweep(at), at);          // 窗口内没人接 → no_one_replied
     const batches = coalescer.flushDue(at);
     if (!batches.length) return { batches: 0, results: [] };
     busy = true;
@@ -156,13 +197,9 @@ export function createRuntime(deps) {
       atBot: !!batch.atBot, replyToBot: !!batch.replyToBot,
       now: batch.lastAt, mergedCount: batch.count
     });
-    const mergedDec = Object.assign({}, await bot.handleEvent(mergedEvt), { evt: mergedEvt });
+    // learn:false —— 逐条判定时已经学过一遍，合并判定不能再学（修 IDF 学两次）
+    const mergedDec = Object.assign({}, await bot.handleEvent(mergedEvt, { learn: false }), { evt: mergedEvt });
     const anchor = pickAnchor(decisions);
-    if (mergedDec.action === "ignore") {
-      stats.ignored += 1;
-      observe({ kind: "merged_ignore", gid: batch.gid, uid: batch.uid, mergedCount: batch.count, verdict: mergedDec.verdict, pSay: mergedDec.pSay });
-      return { gid: batch.gid, action: "ignore", merged: batch.count, verdict: mergedDec.verdict };
-    }
     const dec = mergedDec;
     const evt = (anchor && anchor.evt) || mergedEvt;
     const hard = !!(mergedEvt.atBot || mergedEvt.replyToBot);
@@ -171,6 +208,22 @@ export function createRuntime(deps) {
     pushHistory(batch);                     // N8：无论观察还是发送，窗口都要推进
     const stageState = stageOf(batch.gid, at);
     stageState.observed += batch.count;
+    // N21：观察期把所有判定（**含判否的**）都记成待标注样本。
+    // 只记判「要回」的样本是拿不到漏接率的 —— 漏接恰恰藏在判否那些里。
+    if (stageState.stage === STAGE_OBSERVE && labels) {
+      labels.recordCandidate({
+        kind: "review", gid: batch.gid, uid: batch.uid, speaker: evt.speaker, text: evt.text,
+        messageId: evt.messageId, localVerdict: dec.verdict, localAction: dec.action,
+        priority: dec.action === "ignore" ? "low" : "high",
+        pSay: dec.pSay, U: dec.U, tier: dec.tier, bucket: dec.bucket, reason: dec.reason
+      });
+      stats.labelCandidates += 1;
+    }
+    if (dec.action === "ignore") {
+      stats.ignored += 1;
+      observe({ kind: "merged_ignore", gid: batch.gid, uid: batch.uid, mergedCount: batch.count, verdict: dec.verdict, pSay: dec.pSay });
+      return { gid: batch.gid, action: "ignore", merged: batch.count, verdict: dec.verdict };
+    }
 
     if (!budget.allowReply(hard)) {
       observe({ kind: "budget_block", gid: batch.gid, uid: batch.uid, hard: hard, budget: budget.status() });
@@ -208,6 +261,8 @@ export function createRuntime(deps) {
       // N8 修订：主体顺序 = 本轮任务 → 搜到的资料 → 上下文窗口（最后）。
       // 前面只放「本轮任务」这种小而易变的东西，人设仍在 system prompt，缓存前缀不受影响。
       const blocks = [taskText];
+      const pb = profileBlock(evt.gid);
+      if (pb) blocks.push(pb);
       const ctxBlock = contextBlock(evt.gid);
       if (ctxBlock) blocks.push(ctxBlock);
       const prompt = blocks.filter(Boolean).join(String.fromCharCode(10, 10));
@@ -236,6 +291,12 @@ export function createRuntime(deps) {
     }
     stats.replies += 1;
     lastBot.set(String(evt.gid), { lastBotText: sent.join(""), lastBotAt: at });
+    // P3：登记一条待定反馈，等这个群的下一条消息来判它是正还是负
+    tracker.noteReply({
+      gid: evt.gid, uid: evt.uid, arm: dec.arm, bucket: dec.bucket, tokens: dec.keywords || [],
+      at: at, tier: dec.tier, segments: sent.length, botNames: (evtDefaults.botNames || []).slice(),
+      inTokens: usage ? Number(usage.inputTokens) || 0 : 0, outTokens: usage ? Number(usage.outputTokens) || 0 : 0
+    });
     observe({
       kind: "sent", gid: batch.gid, uid: batch.uid, speaker: evt.speaker, tier: dec.tier,
       mergedCount: batch.count, mood: parsed.mood || null, memePending: parsed.mood || null,
@@ -266,6 +327,9 @@ export function createRuntime(deps) {
     members: function (gid) { const m = members.get(String(gid)); return m ? Object.fromEntries(m) : {}; },
     history: function (gid) { return (history.get(String(gid)) || []).slice(); },
     stage: function (gid) { return Object.assign({}, stageOf(gid, now())); },
+    tracker: tracker, labels: labels,
+    pendingFeedback: function () { return tracker.pendingCount(); },
+    labelStatus: function () { return labels ? labels.status() : null; },
     observe: observe, stats: function () { return Object.assign({}, stats); }
   };
 }

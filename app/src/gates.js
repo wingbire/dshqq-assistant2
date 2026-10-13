@@ -52,7 +52,8 @@ export function createGates(opts) {
     const injected = isInstructionLike(raw);
     if (injected) reason.push("外部文本疑似注入 → 已标记，不执行");
 
-    addressee.learn(evt.gid, text);
+    // 合并判定时不能重复学（否则 IDF 语料把同一句话算两遍）
+    if (context.learn !== false) addressee.learn(evt.gid, text);
     const hard = hardTrigger(Object.assign({}, evt, { text: text }), botNames);
     if (hard.strength > 0) reason.push("硬触发:" + hard.hits.join("+"));
 

@@ -25,8 +25,9 @@ export function createBot(opts) {
   let replies = 0;
   const refN = score.refN || 20;
 
-  async function handleEvent(evt) {
-    const decision = await gates.decide(evt, { costScale: costScaleOf(feedback, 900) });
+  async function handleEvent(evt, opts) {
+    const o = opts || {};
+    const decision = await gates.decide(evt, { costScale: costScaleOf(feedback, 900), learn: o.learn });
     decision.memeHint = decision.tier === "high" ? null : (decision.tier === "mid" ? "（可配图，情绪明确时）" : "（可配图）");
     return decision;
   }
@@ -81,6 +82,8 @@ export function createBot(opts) {
   return {
     store: store, gates: gates, bandit: bandit, score: score, proactive: proactive, considerProactive: considerProactive,
     handleEvent: handleEvent, say: say, observe: observe, saveState: saveState,
+    setBounds: function (b) { return gates.setBounds(b); }, getBounds: function () { return gates.getBounds(); },
+    feedbackCount: function () { return feedback.length; },
     profilePrompt: function (gid) { return buildProfilePrompt(store.loadProfile(gid) || {}); },
     stats: function () { return { replies: replies, feedback: feedback.length, bounds: gates.getBounds(), bandit: bandit.state() }; }
   };
