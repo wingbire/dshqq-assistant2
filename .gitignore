@@ -4,6 +4,10 @@ app/dsh-data/
 # 早期 brain 默认输出路径留下的空壳（残留清理清单 #3）
 dsh-data/
 
+# === 大脑通道的工作区 DSH_HOME（N1 决策：profile 落在工作区内，零写入 ~/.dsh）===
+# 只忽略运行期；人设真源在 prompts/，由程序渲染进 app/dsh-home/profiles/*/cordis.patch.yml
+app/dsh-home/
+
 # === 依赖 / 日志 ===
 node_modules/
 *.log
