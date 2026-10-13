@@ -1,7 +1,9 @@
 import { createCoalescer, pickAnchor } from "./coalesce.js";
 import { splitReply } from "./split.js";
 import { createBudget } from "./budget.js";
-import { createBrakes, parseAdminCommand, isAdmin } from "./brakes.js";
+import { createBrakes } from "./brakes.js";
+import { createDefaultCommands } from "./commands.js";
+import { createMemeLibrary, shouldAttachMeme } from "./meme.js";
 import { localReply } from "./localreply.js";
 import { depthPolicy, buildTaskText } from "./brain.js";
 import { parseMeme } from "./audit.js";
@@ -20,6 +22,9 @@ export function createRuntime(deps) {
   const send = d.send || function () { return false; };
   const askBrain = d.askBrain || null;
   const searchSvc = d.search || null;
+  const memes = d.memes || createMemeLibrary({});
+  const sendImage = d.sendImage || null;
+  const repliesSinceMeme = new Map();      // gid -> 距上次配图过了几次回复（「少」档要拉开间隔）
   const now = d.now || function () { return Date.now(); };
   const rng = d.rng || Math.random;
   const log = d.log || function () {};
@@ -40,8 +45,10 @@ export function createRuntime(deps) {
   const coalescer = createCoalescer({ windowMs: rc.coalesceWindowMs, maxBatch: rc.coalesceMaxBatch });
   const budget = d.budget || createBudget({ limits: rc.budget, now: now });
   const brakes = d.brakes || createBrakes({ config: cfg, now: now });
+  // 指令注册表要拿到真的 brakes / budget，所以必须在这两行之后建
+  const commands = d.commands || createDefaultCommands({ brakes: brakes, budget: budget, now: now, stopMinutes: rc.stopMinutes || 60 });
 
-  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0 };
+  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0, memesSent: 0, memesMissed: 0, memesSuppressed: 0, proactiveTried: 0, proactiveSpoken: 0, proactiveBlocked: 0 };
   let busy = false;
 
   function observe(rec) {
@@ -74,6 +81,65 @@ export function createRuntime(deps) {
       }
     }
     return list.length;
+  }
+
+  // N15：情绪标记 → 去 dsh-meme 图库取图，按「关/少/中」与档位节制
+  async function attachMeme(gid, mood, tier) {
+    const key = String(gid);
+    const since = repliesSinceMeme.get(key);
+    const gate = shouldAttachMeme(tier, mood, {
+      freq: rc.memeFreq || "少",
+      sinceLastMeme: since == null ? 999 : since,
+      replyGapReplies: rc.memeGapReplies != null ? rc.memeGapReplies : 3
+    });
+    function bump() { const n = repliesSinceMeme.get(key); repliesSinceMeme.set(key, n == null ? 1 : n + 1); }
+    bump();
+    if (!mood) return null;
+    if (!gate.attach) { stats.memesSuppressed += 1; observe({ kind: "meme_suppressed", gid: key, mood: mood, reason: gate.reason }); return null; }
+    if (!memes || !memes.ready || !sendImage) { stats.memesMissed += 1; return null; }
+    const hit = memes.find(mood);
+    if (!hit) { stats.memesMissed += 1; observe({ kind: "meme_miss", gid: key, mood: mood }); return null; }
+    sendImage(key, hit.path);
+    stats.memesSent += 1;
+    repliesSinceMeme.set(key, 0);
+    return { tag: hit.tag, file: hit.file, score: hit.score, mood: mood, reason: gate.reason };
+  }
+
+  function groupInterests(gid) {
+    if (!store || typeof store.loadProfile !== "function") return [];
+    const p = store.loadProfile(gid);
+    return (p && p.interests) || [];
+  }
+
+  // N16：没被点名、但话题撞上兴趣时，在全自动阶段插一句短的。
+  // 注意：本地 low 档是「不进大脑」的短句池，但主动搭话没有可回应的对象，短句池说不出内容，
+  // 所以这里仍然走一次大脑，只是把档位策略设成 low（≤20 字）。这条偏差记在 设计节点.md §17。
+  async function tryProactive(evtLike, batch, atMs) {
+    if (rc.proactive && rc.proactive.enabled === false) return null;
+    if (stageOf(batch.gid, atMs).stage !== STAGE_FULL) return null;
+    if (!budget.allowProactive()) { stats.proactiveBlocked += 1; return null; }
+    if (!askBrain || !bot.considerProactive) return null;
+    const interests = groupInterests(batch.gid).concat(evtDefaults.interests || []);
+    const p = bot.considerProactive(evtLike, { action: "ignore" }, { interests: interests });
+    if (!p || !p.speak) return null;
+    stats.proactiveTried += 1;
+    const NL = String.fromCharCode(10);
+    const policy = depthPolicy("low", { contextWindow: rc.contextWindow });
+    const ctx = contextBlock(batch.gid);
+    const prompt = "【本轮任务】" + NL
+      + "场景：没人在叫你，但话题撞上了你感兴趣的东西（" + (p.reason || "") + "）。" + NL
+      + "字数上限：" + (p.maxChars || 20) + NL
+      + "直接输出你要插进群里的那一句短话，不要解释，不要问号收尾。" + NL + NL + ctx;
+    const r = await askBrain({ promptText: prompt, tier: "low", proactive: true, evt: evtLike });
+    if (!r || !r.ok || !r.text) { observe({ kind: "proactive_error", gid: batch.gid, error: r ? r.error : null }); return null; }
+    const clean = parseMeme(r.text).text;
+    const segs = splitReply(clean, p.maxChars || 20, { maxSegments: 1 }).filter(Boolean);
+    if (!segs.length) return null;
+    for (const s of segs) send(batch.gid, s);
+    stats.proactiveSpoken += 1;
+    stats.replies += 1;
+    observe({ kind: "proactive_sent", gid: batch.gid, reason: p.reason, keywords: p.keywords, text: segs.join("") });
+    return { segments: segs, reason: p.reason };
   }
 
   // N8：群档案排在「本轮任务」之后、上下文之前 —— 它每 refN 次才变一次
@@ -138,23 +204,13 @@ export function createRuntime(deps) {
     const st = brakes.state(evt.gid, evt.now);
     if (st.stopped) { stats.stopped += 1; return { action: "stopped", reason: st.reason }; }
 
-    const cmd = parseAdminCommand(evt.text);
-    if (cmd) {
-      if (!isAdmin(evt, adminConfig())) return { action: "ignored", reason: "非管理员" };
+    // N17：指令走注册表 —— 权限判定与二次确认都在 commands.js 里
+    const cRes = commands.dispatch(evt, { config: adminConfig(), budget: budget, brakes: brakes, store: store });
+    if (cRes.handled) {
       stats.adminCmds += 1;
-      if (cmd.cmd === "stop") {
-        brakes.stopGroup(evt.gid, cmd.minutes, evt.now);
-        send(evt.gid, "行，我先闭嘴 " + cmd.minutes + " 分钟。");
-        return { action: "admin_stop", minutes: cmd.minutes };
-      }
-      if (cmd.cmd === "resume") {
-        brakes.resumeGroup(evt.gid);
-        send(evt.gid, "好，我回来了。");
-        return { action: "admin_resume" };
-      }
-      const s = budget.status();
-      send(evt.gid, "今天用了 " + s.used + "/" + s.limit + "，" + s.mode);
-      return { action: "admin_status", budget: s };
+      if (cRes.reply) send(evt.gid, cRes.reply);
+      observe({ kind: "command", gid: evt.gid, uid: evt.uid, name: cRes.name, ok: !!cRes.ok, action: cRes.action });
+      return { action: cRes.action, ok: !!cRes.ok, name: cRes.name, minutes: cRes.minutes, budget: cRes.budget, needsConfirm: !!cRes.needsConfirm };
     }
 
     coalescer.push(evt);
@@ -222,7 +278,8 @@ export function createRuntime(deps) {
     if (dec.action === "ignore") {
       stats.ignored += 1;
       observe({ kind: "merged_ignore", gid: batch.gid, uid: batch.uid, mergedCount: batch.count, verdict: dec.verdict, pSay: dec.pSay });
-      return { gid: batch.gid, action: "ignore", merged: batch.count, verdict: dec.verdict };
+      const pro = await tryProactive(mergedEvt, batch, at);
+      return { gid: batch.gid, action: "ignore", merged: batch.count, verdict: dec.verdict, proactive: pro };
     }
 
     if (!budget.allowReply(hard)) {
@@ -289,7 +346,9 @@ export function createRuntime(deps) {
       stats.segments += 1;
       if (i < segments.length - 1 && sendGapMs > 0) await sleep(sendGapMs);
     }
+    const memeInfo = await attachMeme(evt.gid, parsed.mood, dec.tier);
     stats.replies += 1;
+    if (bot.proactive && bot.proactive.markBotReply) bot.proactive.markBotReply(at, evt.gid);
     lastBot.set(String(evt.gid), { lastBotText: sent.join(""), lastBotAt: at });
     // P3：登记一条待定反馈，等这个群的下一条消息来判它是正还是负
     tracker.noteReply({
@@ -300,9 +359,9 @@ export function createRuntime(deps) {
     observe({
       kind: "sent", gid: batch.gid, uid: batch.uid, speaker: evt.speaker, tier: dec.tier,
       mergedCount: batch.count, mood: parsed.mood || null, memePending: parsed.mood || null,
-      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo
+      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo, meme: memeInfo
     });
-    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo };
+    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo, meme: memeInfo };
   }
 
   function r0(usage) {

@@ -109,6 +109,15 @@ export function runtimeConfig(cfg) {
       dedupeWindowMs: getPath(c, "runtime.onebot.dedupeWindowMs") || 180000
     },
     searchMode: String(getPath(c, "runtime.search.mode") || "c").toLowerCase() === "b" ? "b" : "c",   // N12：B/C 可切换
+    memeFreq: getPath(c, "persona.memeFreq") || "少",                                                  // N15：关/少/中
+    memeGapReplies: getPath(c, "runtime.memeGapReplies") != null ? getPath(c, "runtime.memeGapReplies") : 3,
+    proactive: {
+      enabled: getPath(c, "autojoin.enabled") !== false,
+      rate: getPath(c, "autojoin.rate") != null ? getPath(c, "autojoin.rate") : 0.25,
+      minGapSec: getPath(c, "autojoin.minGapSec") != null ? getPath(c, "autojoin.minGapSec") : 120,
+      maxPerHour: getPath(c, "autojoin.maxPerHour") != null ? getPath(c, "autojoin.maxPerHour") : 6,
+      maxChars: 20
+    },
     autojoinRate: getPath(c, "autojoin.rate") != null ? getPath(c, "autojoin.rate") : 0.25,
     minGapSec: getPath(c, "autojoin.minGapSec") != null ? getPath(c, "autojoin.minGapSec") : 120
   };

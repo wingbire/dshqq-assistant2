@@ -10,6 +10,7 @@ import { runBrain, ensureBrainProfile, resolveDshCli } from "./src/brain.js";
 import { personaFromConfig } from "./src/dshprofile.js";
 import { createAuditor, setAuditChannel, loadRubric } from "./src/audit.js";
 import { createSearch, SEARCH_PROFILE_ID, SEARCH_PERSONA } from "./src/search.js";
+import { createMemeLibrary } from "./src/meme.js";
 import { CONFIG_FILE, DATA_ROOT } from "./src/paths.js";
 
 const args = process.argv.slice(2);
@@ -71,8 +72,13 @@ const searchSvc = createSearch({
   }
 });
 
+// N15 图库：直接读 dsh-meme 的图库（sqlite index.db）
+const memes = createMemeLibrary({});
+log("图库：" + (memes.ready ? memes.rows.length + " 张 / " + memes.tags().length + " 个情绪标签 @ " + memes.packDir : "没找到（配图会跳过）"));
+
 const runtime = createRuntime({
-  config: cfg, runtime: rc, store: store, bot: bot, search: searchSvc,
+  config: cfg, runtime: rc, store: store, bot: bot, search: searchSvc, memes: memes,
+  sendImage: function (gid, file) { log("→图 " + gid + " : " + path.basename(file)); return ob.sendGroupImage(gid, file); },
   evtDefaults: { botNames: [persona.botName], nicknames: [persona.botName], interests: persona.interests, dislikes: persona.dislikes },
   send: function (gid, text) { log("→ " + gid + " : " + text); return ob.sendGroupMsg(gid, text); },
   askBrain: async function (o) {

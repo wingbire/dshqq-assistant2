@@ -22,6 +22,8 @@ import { DEFAULT_BOUNDS } from "../app/src/gatescore.js";
 import { createTracker, isAnnoyed, calledBot } from "../app/src/feedback.js";
 import { createLabelQueue, foldLabels, pendingOf, labeledOf, agreementStats, shortHash } from "../app/src/label.js";
 import { buildProfilePrompt } from "../app/src/profile.js";
+import { createMemeLibrary, shouldAttachMeme, scoreRow, scanPack, resolveMemeRoots, MEME_DEFAULTS } from "../app/src/meme.js";
+import { createCommands, createDefaultCommands, permLevelOf, allow } from "../app/src/commands.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -323,9 +325,11 @@ t("dshprofile: writeProfilePatch 落盘可回读", function () {
 t("secrets: maskKey 不泄露明文", function () {
   eq(maskKey(""), null);
   eq(maskKey("short"), "***");
-  const m = maskKey("sk-TESTFIXTURE0000000000000000000000");
-  ok(m.startsWith("sk-843"));
-  ok(!m.includes("654abb"), "中段必须被遮住");
+  // 纯假值夹具 —— 这里绝不放真实密钥（曾经放过，已在 git 历史里清掉）
+  const fixture = "sk-FIXTURE-abcd-1234-0000-WXYZ";
+  const m = maskKey(fixture);
+  eq(m, "sk-FIX...WXYZ");
+  ok(!m.includes("abcd-1234"), "中段必须被遮住");
 });
 
 t("secrets: parseRefsApiKey 只认 refs 块里的目标键", function () {
@@ -1164,6 +1168,198 @@ t("runtime: 群档案块进 prompt，且仍在上下文之前", async function (
   ok(p.includes("【本群画像】"), "应带群档案");
   ok(p.includes("报错"), "应带群兴趣");
   ok(p.indexOf("【本群画像】") < p.indexOf("【群里的上下文"), "群档案要在上下文之前");
+});
+
+// ===== P4：图库 / 主动搭话 / 指令框架 =====
+
+t("meme: 图库加载（sqlite index.db）并匹配情绪描述", function () {
+  const lib = createMemeLibrary({});
+  if (!lib.ready) { ok(true, "本机没有 dsh-meme 图库，跳过"); return; }
+  ok(lib.rows.length >= 20, "应载入 20+ 张，实得 " + lib.rows.length);
+  ok(lib.tags().length >= 10, "情绪标签应有 10+ 个，实得 " + lib.tags().length);
+  const cases = [["无语", "sigh"], ["得意", "happy"], ["生气", "angry"], ["摸鱼", "work"], ["求饶", "sad"], ["干饭", "daily"]];
+  for (const c of cases) {
+    const hit = lib.find(c[0]);
+    ok(hit, c[0] + " 应能匹配到图");
+    eq(hit.tag, c[1], c[0] + " 应落到 " + c[1] + " 标签，实得 " + (hit && hit.tag));
+  }
+  eq(lib.find("完全不相干的火星词"), null);
+});
+
+t("meme: 分数越具体越高", function () {
+  const a = { tag: "happy", file_name: "deyi.jpg", caption: "得意闭眼", keywords: "得意 好耶" };
+  const b = { tag: "see", file_name: "zhenjing.jpg", caption: "惊吓", keywords: "震惊 哇" };
+  ok(scoreRow(a, "得意") > scoreRow(a, "得"), "整词命中要高于单字");
+  ok(scoreRow(a, "得意") > scoreRow(b, "得意"), "不相关的图不能赢");
+  eq(scoreRow(a, ""), 0);
+});
+
+t("meme: 没有 index.db 时按目录名兜底扫", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "pack-" + Date.now());
+  fs.mkdirSync(path.join(dir, "memes", "happy"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "memes", "happy", "ok.jpg"), "x");
+  const rows = scanPack(dir);
+  eq(rows.length, 1);
+  eq(rows[0].tag, "happy");
+  eq(rows[0].file_name, "ok.jpg");
+});
+
+t("meme: 配图节制规则", function () {
+  eq(shouldAttachMeme("high", "无语", {}).attach, false, "详细回答不配图");
+  eq(shouldAttachMeme("mid", null, {}).attach, false, "没情绪标记不配图");
+  eq(shouldAttachMeme("mid", "无语", { freq: "关" }).attach, false);
+  eq(shouldAttachMeme("mid", "无语", { freq: "少", sinceLastMeme: 1 }).attach, false, "「少」档要拉开间隔");
+  eq(shouldAttachMeme("mid", "无语", { freq: "少", sinceLastMeme: 5 }).attach, true);
+  eq(shouldAttachMeme("mid", "无语", { freq: "中", sinceLastMeme: 0 }).attach, true);
+  eq(shouldAttachMeme("mid", "无语", { adminCommand: true }).attach, false);
+  eq(MEME_DEFAULTS.replyGapReplies, 3);
+});
+
+t("onebot: 发图走 image 段", function () {
+  const sent = [];
+  const sock = { send: function (s) { sent.push(JSON.parse(s)); }, close: function () {} };
+  const ob = createOneBot({ url: "ws://x", transport: function () { return sock; }, now: function () { return 0; } });
+  ob.connect(); sock.onopen();
+  ob.sendGroupImage("255452871", "C:\\a\\b\\wuyu.jpg");
+  eq(sent[0].action, "send_group_msg");
+  eq(Array.isArray(sent[0].params.message), true);
+  eq(sent[0].params.message[0].type, "image");
+  eq(sent[0].params.message[0].data.file, "C:/a/b/wuyu.jpg", "路径统一成正斜杠");
+});
+
+t("commands: 权限分级与白名单", function () {
+  eq(permLevelOf({ uid: "1", role: "owner" }, {}), "owner");
+  eq(permLevelOf({ uid: "1", role: "admin" }, {}), "admin");
+  eq(permLevelOf({ uid: "1", role: "member" }, { whitelist: ["1"] }), "whitelist");
+  eq(permLevelOf({ uid: "1", role: "member" }, {}), "any");
+  eq(allow({ uid: "1", role: "member" }, {}, "admin"), false);
+  eq(allow({ uid: "1", role: "admin" }, {}, "admin"), true);
+});
+
+t("commands: 只认整条指令 + 别名 + 未注册", function () {
+  const c = createDefaultCommands({ stopMinutes: 60 });
+  eq(c.parse("/停 5").name, "停");
+  eq(c.parse("/stop").name, "stop");
+  eq(c.parse("我们/停一下吧"), null);
+  eq(c.dispatch({ uid: "1", role: "admin", gid: "A", text: "我们/停一下吧" }, { config: {} }).handled, false);
+  const u = c.dispatch({ uid: "1", role: "owner", gid: "A", text: "/不存在的命令" }, { config: {} });
+  eq(u.handled, false);
+  eq(c.list().length, 4, "内置 4 条：停/开/状态/帮助");
+});
+
+t("commands: 危险命令要二次确认", function () {
+  const c = createCommands({});
+  let ran = 0;
+  c.register({ name: "清空", perm: "owner", dangerous: true, handler: function () { ran += 1; return { reply: "清了" }; } });
+  const evt = { uid: "9", role: "owner", gid: "A", text: "/清空", now: 0 };
+  const r1 = c.dispatch(evt, { config: {} });
+  eq(r1.needsConfirm, true);
+  eq(ran, 0, "没确认不能执行");
+  const r2 = c.dispatch({ uid: "9", role: "owner", gid: "A", text: "/清空 确认" }, { config: {} });
+  eq(r2.ok, true);
+  eq(ran, 1);
+});
+
+t("commands: 越权一律拒绝并回一句", function () {
+  const c = createDefaultCommands({ stopMinutes: 60 });
+  const r = c.dispatch({ uid: "7", role: "member", gid: "A", text: "/停" }, { config: {} });
+  eq(r.handled, true);
+  eq(r.ok, false);
+  eq(r.action, "denied");
+  ok(r.reply);
+});
+
+t("runtime: 情绪标记 → 真的发图（假 sendImage）", async function () {
+  const images = [];
+  const lib = { ready: true, find: function () { return { tag: "sigh", file: "wuyu.jpg", path: "C:/m/wuyu.jpg", score: 64 }; }, rows: [], tags: function () { return []; } };
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50, memeFreq: "中", memeGapReplies: 0 },
+    store: { addObservation: function () {} },
+    bot: Object.assign(fakeBot({ tier: "mid" }), { observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; } }),
+    memes: lib, sendImage: function (gid, f) { images.push([gid, f]); },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "行吧这波我确实没看懂 [表情: 无语]", usage: { totalTokens: 10 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "在吗", now: 0 });
+  const r = await rt.tick(200);
+  eq(images.length, 1, "应发 1 张图");
+  eq(images[0][1], "C:/m/wuyu.jpg");
+  eq(r.results[0].meme.tag, "sigh");
+  eq(r.results[0].segments[0].indexOf("[表情:"), -1, "正文里的标记要被摘掉");
+  eq(rt.stats().memesSent, 1);
+});
+
+t("runtime: 详细档不配图", async function () {
+  const images = [];
+  const lib = { ready: true, find: function () { return { tag: "sigh", file: "w.jpg", path: "C:/m/w.jpg", score: 9 }; }, rows: [], tags: function () { return []; } };
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50, memeFreq: "中" },
+    store: { addObservation: function () {} },
+    bot: Object.assign(fakeBot({ tier: "high", maxChars: 200 }), { observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; } }),
+    memes: lib, sendImage: function () { images.push(1); },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "详细讲：[表情: 无语]", usage: { totalTokens: 10 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "详细讲讲", now: 0 });
+  await rt.tick(200);
+  eq(images.length, 0);
+  eq(rt.stats().memesSuppressed, 1);
+});
+
+t("runtime: 没被点名但撞上兴趣 → 全自动阶段插一句", async function () {
+  const sent = [];
+  const prompts = [];
+  const proBot = {
+    handleEvent: async function () { return { action: "ignore", verdict: "no", pSay: 0.1, U: 0.05, tier: "low", maxChars: 20, search: 0, keywords: [], bucket: "general", arm: "terse", reason: [], injected: false }; },
+    considerProactive: function () { return { speak: true, maxChars: 20, reason: "兴趣命中：单机游戏", keywords: ["单机游戏"] }; },
+    observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; }
+  };
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50, proactive: { enabled: true } },
+    store: { addObservation: function () {} },
+    bot: proBot,
+    send: function (g, t) { sent.push(t); },
+    askBrain: async function (o) { prompts.push(o.promptText); return { ok: true, text: "我也在玩这个。", usage: { totalTokens: 8 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "最近在玩单机游戏", now: 0 });
+  const r = await rt.tick(200);
+  eq(sent.length, 1, "应插一句话");
+  eq(sent[0], "我也在玩这个。");
+  eq(r.results[0].proactive.segments.length, 1);
+  ok(prompts[0].indexOf("没人在叫你") >= 0, "主动搭话的提示词要说明场景");
+  eq(rt.stats().proactiveSpoken, 1);
+});
+
+t("runtime: 不满足条件时不插话（不抢话/预算关闭）", async function () {
+  const sent = [];
+  const quietBot = {
+    handleEvent: async function () { return { action: "ignore", verdict: "no", pSay: 0.1, U: 0.05, tier: "low", maxChars: 20, search: 0, keywords: [], bucket: "general", arm: "terse", reason: [], injected: false }; },
+    considerProactive: function () { return { speak: false, reason: "未命中兴趣" }; },
+    observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; }
+  };
+  const rt1 = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50, proactive: { enabled: true } },
+    store: { addObservation: function () {} }, bot: quietBot,
+    send: function (g, t) { sent.push(t); }, askBrain: async function () { return { ok: true, text: "x" }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt1.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "随便说说", now: 0 });
+  await rt1.tick(200);
+  eq(sent.length, 0);
+  eq(rt1.stats().proactiveTried, 0);
+  const rt2 = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50, proactive: { enabled: true } },
+    store: { addObservation: function () {} },
+    bot: Object.assign({}, quietBot, { considerProactive: function () { return { speak: true, maxChars: 20, reason: "兴趣命中" }; } }),
+    budget: (function () { const b = createBudget({ limits: { dailyTokens: 10 }, now: function () { return 0; } }); b.record(10, 0); return b; })(),
+    send: function (g, t) { sent.push(t); }, askBrain: async function () { return { ok: true, text: "x" }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt2.onEvent({ gid: "A", uid: "u2", speaker: "乙", text: "随便说说", now: 0 });
+  await rt2.tick(200);
+  eq(sent.length, 0, "预算硬线之上不该主动插话");
+  eq(rt2.stats().proactiveBlocked, 1);
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===

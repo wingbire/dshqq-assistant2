@@ -162,6 +162,14 @@ export function createOneBot(opts) {
     return send({ action: "send_group_msg", params: { group_id: Number(gid), message: String(text) }, echo: echo });
   }
 
+  // 发图：OneBot v11 的 image 段。NapCat 认绝对路径（统一成正斜杠更稳）
+  function sendGroupImage(gid, file) {
+    if (!file) return false;
+    const echo = "dshqq-img-" + nowFn() + "-" + Math.floor(Math.random() * 1e6);
+    const p = String(file).replace(/\\/g, "/");
+    return send({ action: "send_group_msg", params: { group_id: Number(gid), message: [{ type: "image", data: { file: p } }] }, echo: echo });
+  }
+
   function close() {
     stopped = true;
     if (timer) clearTimeout(timer);
@@ -170,7 +178,7 @@ export function createOneBot(opts) {
   }
 
   return {
-    connect: connect, close: close, send: send, sendGroupMsg: sendGroupMsg,
+    connect: connect, close: close, send: send, sendGroupMsg: sendGroupMsg, sendGroupImage: sendGroupImage,
     state: function () { return state; }, selfId: function () { return selfId; },
     sentIds: sentIds, seenCount: function () { return seen.size; },
     config: cfg
