@@ -25,6 +25,8 @@ import { buildProfilePrompt } from "../app/src/profile.js";
 import { createMemeLibrary, shouldAttachMeme, scoreRow, scanPack, resolveMemeRoots, MEME_DEFAULTS } from "../app/src/meme.js";
 import { createCommands, createDefaultCommands, permLevelOf, allow } from "../app/src/commands.js";
 import { createWebUi, summarizeObservations, DEFAULT_PORT } from "../app/src/webui.js";
+import { createVision, isImageSegment, imageSegmentsOf, mimeOf, resolveLocalImage, buildHttpBody, parseHttpAnswer, injectVision, VISION_DEFAULTS, VISION_PROFILE_ID } from "../app/src/vision.js";
+import { createTts, parseVoiceTag, buildSapiScript, TTS_DEFAULTS } from "../app/src/tts.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -1420,6 +1422,191 @@ t("webui: 配置端 API 读写、遮蔽 secret、挡目录穿越", async functio
   } finally {
     await ui.close();
   }
+});
+
+// ===== N18：识图与语音 =====
+
+t("vision: 纯图片消息不再被归一化丢掉", function () {
+  const raw = { post_type: "message", message_type: "group", group_id: 1, user_id: 2, self_id: 9, message_id: 5, sender: { nickname: "甲" }, message: [{ type: "image", data: { file: "C:/a.jpg", url: "http://x/a.jpg" } }] };
+  const e = normalizeEvent(raw, { selfId: "9", now: 0 });
+  ok(e, "纯图片消息必须保留");
+  eq(e.text, "");
+  eq(e.hasImage, true);
+  eq(e.images.length, 1);
+  eq(e.atBot, false);
+});
+
+t("vision: 片段识别与 mime", function () {
+  eq(isImageSegment({ type: "image" }), true);
+  eq(isImageSegment({ type: "text" }), false);
+  eq(imageSegmentsOf({ segments: [{ type: "text" }, { type: "image", data: { file: "a.png" } }] }).length, 1);
+  eq(mimeOf("x.PNG"), "image/png");
+  eq(mimeOf("x.jpg"), "image/jpeg");
+});
+
+t("vision: http 请求体与回包解析", function () {
+  const body = buildHttpBody("mimo-v2.6-flash-free", "看图", "AAAA", "image/png", 128);
+  eq(body.model, "mimo-v2.6-flash-free");
+  eq(body.messages[0].content[1].image_url.url, "data:image/png;base64,AAAA");
+  eq(body.messages[0].content[0].text, "看图");
+  eq(parseHttpAnswer({ choices: [{ message: { content: " 一只猫 " } }] }), "一只猫");
+  eq(parseHttpAnswer({ choices: [{ message: { content: [{ text: "甲" }, { text: "乙" }] } }] }), "甲乙");
+  eq(parseHttpAnswer({}), "");
+});
+
+t("vision: 本地图片解析与体积上限", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "vis-" + Date.now());
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "a.jpg");
+  fs.writeFileSync(f, Buffer.alloc(2048, 1));
+  const r = resolveLocalImage({ file: f }, {});
+  eq(r.ok, true);
+  eq(r.bytes, 2048);
+  eq(r.mime, "image/jpeg");
+  eq(resolveLocalImage({ file: f }, { maxBytes: 100 }).ok, false);
+  eq(resolveLocalImage({ url: "https://x/a.jpg" }).needDownload, true);
+  eq(resolveLocalImage({}).ok, false);
+});
+
+t("vision: 没启用就直接跳过", async function () {
+  const v = createVision({ config: { mode: "off" } });
+  const r = await v.describe({ ok: true, path: "x", bytes: 1, mime: "image/jpeg" });
+  eq(r.ok, false);
+  eq(v.enabled(), false);
+  eq(v.stats().skipped, 1);
+});
+
+t("vision: http 后端拿到描述并按上限截断", async function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "vis2-" + Date.now());
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "a.png");
+  fs.writeFileSync(f, Buffer.alloc(64, 2));
+  let seenUrl = "", seenAuth = "";
+  const v = createVision({
+    config: { mode: "http", endpoint: "https://api.test/v1/chat/completions", apiKey: "K", model: "m", maxChars: 10 },
+    fetch: async function (url, opt) { seenUrl = url; seenAuth = opt.headers.authorization; return { ok: true, status: 200, json: async function () { return { choices: [{ message: { content: "这是一段很长的图片描述文字" } }] }; } }; }
+  });
+  const r = await v.describe({ ok: true, path: f, bytes: 64, mime: "image/png" });
+  eq(r.ok, true);
+  eq(r.text.length, 10);
+  ok(r.text.endsWith("…"));
+  eq(seenUrl, "https://api.test/v1/chat/completions");
+  eq(seenAuth, "Bearer K");
+  eq(v.stats().ok, 1);
+});
+
+t("vision: 失败不抛异常，返回 ok:false", async function () {
+  const v = createVision({ config: { mode: "http", endpoint: "https://api.test/x" }, fetch: async function () { return { ok: false, status: 500 }; } });
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "vis3-" + Date.now());
+  fs.mkdirSync(dir, { recursive: true });
+  const f = path.join(dir, "a.jpg");
+  fs.writeFileSync(f, "x");
+  const r = await v.describe({ ok: true, path: f, bytes: 1, mime: "image/jpeg" });
+  eq(r.ok, false);
+  ok(String(r.error).indexOf("500") >= 0);
+  eq(v.stats().fail, 1);
+});
+
+t("vision: 描述拼进上下文并标注不可信", function () {
+  const out = injectVision("甲：看看这个", ["图里是一张报错截图"]);
+  ok(out.indexOf("甲：看看这个") === 0, "原上下文不能被改");
+  ok(out.indexOf("报错截图") >= 0);
+  ok(out.indexOf("不可信") >= 0);
+  eq(injectVision("甲：说话", []), "甲：说话");
+  eq(VISION_DEFAULTS.mode, "off", "默认不启用识图");
+  eq(VISION_PROFILE_ID, "qq-vision");
+});
+
+t("tts: [语音: …] 标记解析", function () {
+  eq(parseVoiceTag("行吧 [语音: 这波我不太懂]").voice, "这波我不太懂");
+  eq(parseVoiceTag("行吧 [语音: 这波我不太懂]").text, "行吧");
+  eq(parseVoiceTag("没有标记").voice, null);
+  eq(parseVoiceTag("没有收尾 [语音: 半截").voice, null);
+});
+
+t("tts: 未启用 / 超长 / 没文字 都拒发", function () {
+  const off = createTts({ config: { enabled: false } });
+  eq(off.synthesize("你好").ok, false);
+  eq(off.enabled(), false);
+  const on = createTts({ config: { enabled: true, maxChars: 5 }, outDir: os.tmpdir(), run: function () { return { status: 0, stdout: "", stderr: "" }; } });
+  eq(on.synthesize("一二三四五六七").ok, false);
+  eq(on.synthesize("").ok, false);
+  eq(on.synthesize("短").ok, false, "假 run 没生成文件 → 判失败");
+});
+
+t("tts: SAPI 脚本里带音色与语速", function () {
+  const s = buildSapiScript("你好", "C:/out.wav", { voice: "Microsoft Huihui", rate: 2 });
+  ok(s.indexOf("System.Speech") >= 0);
+  ok(s.indexOf("Microsoft Huihui") >= 0);
+  ok(s.indexOf("$s.Rate = 2") >= 0);
+  ok(s.indexOf("C:/out.wav") >= 0);
+  ok(buildSapiScript("带'引号", "x", {}).indexOf("''") >= 0, "单引号要转义");
+});
+
+t("tts: 真机 SAPI 能生成 wav（Windows）", function () {
+  if (process.platform !== "win32") { ok(true, "非 Windows 跳过"); return; }
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "tts-" + Date.now());
+  const t = createTts({ config: { enabled: true, voice: "Microsoft Huihui", maxChars: 60 }, outDir: dir });
+  const r = t.synthesize("这是回归测试");
+  eq(r.ok, true, "TTS 失败：" + r.error);
+  ok(r.bytes > 10000, "wav 应该有点大小，实得 " + r.bytes);
+  eq(fs.readFileSync(r.file).subarray(0, 4).toString(), "RIFF");
+});
+
+t("runtime: 图片消息会先识图再判定，描述进 prompt", async function () {
+  const prompts = [];
+  const vision = { enabled: function () { return true; }, describe: async function () { return { ok: true, text: "一张报错截图" }; } };
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: { addObservation: function () {} },
+    bot: Object.assign(fakeBot({ tier: "mid" }), { observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; } }),
+    vision: vision, imageDir: os.tmpdir(),
+    send: function () {}, askBrain: async function (o) { prompts.push(o.promptText); return { ok: true, text: "看到了", usage: { totalTokens: 5 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "", images: [{ file: "C:/a.jpg" }], hasImage: true, now: 0 });
+  const r = await rt.tick(200);
+  eq(rt.stats().visionCalls, 1);
+  eq(rt.stats().visionOk, 1);
+  ok(prompts[0].indexOf("报错截图") >= 0, "图片描述必须进 prompt");
+  eq(r.results[0].vision.length, 1);
+});
+
+t("runtime: [语音: …] 会合成并发 record 段", async function () {
+  const records = [];
+  const tts = { enabled: function () { return true; }, synthesize: function () { return { ok: true, file: "C:/v.wav", bytes: 12345, chars: 4 }; } };
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: { addObservation: function () {} },
+    bot: Object.assign(fakeBot({ tier: "mid" }), { observe: function () { return { refit: false }; }, profilePrompt: function () { return ""; } }),
+    tts: tts, sendRecord: function (g, f) { records.push([g, f]); },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "行吧 [语音: 这波我不太懂]", usage: { totalTokens: 5 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "在吗", now: 0 });
+  const r = await rt.tick(200);
+  eq(records.length, 1);
+  eq(records[0][1], "C:/v.wav");
+  eq(rt.stats().voiceSent, 1);
+  eq(r.results[0].segments[0].indexOf("[语音:"), -1, "正文里的语音标记要摘掉");
+  eq(r.results[0].voice.bytes, 12345);
+});
+
+t("runtime: /说 指令走 TTS", async function () {
+  const records = [];
+  const tts = { enabled: function () { return true; }, synthesize: function (t) { return { ok: true, file: "C:/say.wav", bytes: 999, chars: t.length }; } };
+  const rt = createRuntime({
+    config: { admin: { owners: ["1001"] } }, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: { addObservation: function () {} }, bot: fakeBot(), tts: tts,
+    sendRecord: function (g, f) { records.push([g, f]); },
+    send: function () {}, askBrain: async function () { return { ok: true, text: "x" }; },
+    now: function () { return 0; }, sleep: async function () {}
+  });
+  const r = await rt.onEvent({ gid: "A", uid: "1001", role: "owner", speaker: "群主", text: "/说 大家好", now: 0 });
+  eq(r.action, "tts");
+  eq(records.length, 1);
+  const deny = await rt.onEvent({ gid: "A", uid: "999", role: "member", speaker: "路人", text: "/说 我也要", now: 0 });
+  eq(deny.ok, false);
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===

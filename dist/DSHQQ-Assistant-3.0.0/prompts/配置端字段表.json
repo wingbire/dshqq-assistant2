@@ -257,6 +257,62 @@
           "说明": "N23：已取消，保持 0"
         },
         {
+          "键": "runtime.vision.enabled",
+          "标签": "启用识图",
+          "类型": "bool",
+          "默认": false,
+          "说明": "N18：收到图片时独立调一次多模态模型，把描述拼进上下文"
+        },
+        {
+          "键": "runtime.vision.mode",
+          "标签": "识图通道",
+          "类型": "enum",
+          "取值": ["off", "http", "dsh"],
+          "默认": "off",
+          "说明": "http=任何 OpenAI 兼容多模态接口；dsh=在 profile 里跑 DSH（需装 Our Free Model）"
+        },
+        {
+          "键": "runtime.vision.endpoint",
+          "标签": "多模态接口地址",
+          "类型": "string",
+          "默认": "",
+          "说明": "http 模式用，例如 https://api.example.com/v1/chat/completions"
+        },
+        {
+          "键": "runtime.vision.apiKey",
+          "标签": "多模态接口 Key",
+          "类型": "secret",
+          "默认": ""
+        },
+        {
+          "键": "runtime.vision.model",
+          "标签": "识图模型",
+          "类型": "string",
+          "默认": "mimo-v2.6-flash-free",
+          "说明": "dsh 模式默认用 Our Free Model 的 MiMo V2.6 Flash"
+        },
+        {
+          "键": "runtime.voice.enabled",
+          "标签": "启用语音",
+          "类型": "bool",
+          "默认": false,
+          "说明": "N18：大脑写出 [语音: 文本] 标记时，用 TTS 念出来发给群"
+        },
+        {
+          "键": "runtime.voice.voice",
+          "标签": "TTS 音色",
+          "类型": "string",
+          "默认": "Microsoft Huihui",
+          "说明": "走 Windows 自带 SAPI，可选 Huihui / Kangkang / Yaoyao"
+        },
+        {
+          "键": "runtime.voice.maxChars",
+          "标签": "语音最长字数",
+          "类型": "int",
+          "默认": 60,
+          "范围": [10, 200]
+        },
+        {
           "键": "runtime.webui.enabled",
           "标签": "启用配置端页面",
           "类型": "bool",

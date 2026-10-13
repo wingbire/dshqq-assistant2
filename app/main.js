@@ -12,7 +12,9 @@ import { createAuditor, setAuditChannel, loadRubric } from "./src/audit.js";
 import { createSearch, SEARCH_PROFILE_ID, SEARCH_PERSONA } from "./src/search.js";
 import { createMemeLibrary } from "./src/meme.js";
 import { createWebUi } from "./src/webui.js";
-import { CONFIG_FILE, DATA_ROOT } from "./src/paths.js";
+import { createVision, VISION_PERSONA } from "./src/vision.js";
+import { createTts } from "./src/tts.js";
+import { CONFIG_FILE, DATA_ROOT, BRAIN_TMP_DIR } from "./src/paths.js";
 
 const args = process.argv.slice(2);
 const selftest = args.includes("--selftest");
@@ -77,8 +79,23 @@ const searchSvc = createSearch({
 const memes = createMemeLibrary({});
 log("图库：" + (memes.ready ? memes.rows.length + " 张 / " + memes.tags().length + " 个情绪标签 @ " + memes.packDir : "没找到（配图会跳过）"));
 
+// N18 识图：独立一次多模态调用（http 直连 / dsh 跑 Our Free Model）
+const vision = createVision({
+  config: rc.vision,
+  runner: async function (req) {
+    if (!cli) return { ok: false, error: "找不到 DSH 启动器" };
+    ensureBrainProfile({ cliPath: cli, profile: req.profile, personaText: VISION_PERSONA });
+    return runBrain({ cliPath: cli, profile: req.profile, promptText: req.promptText, timeoutMs: req.timeoutMs });
+  }
+});
+// N18 语音：TTS 走 Windows 自带 SAPI（离线、零依赖）
+const tts = createTts({ config: rc.voice, outDir: path.join(DATA_ROOT, "voice") });
+log("识图：" + (rc.vision.enabled ? rc.vision.mode + " / " + rc.vision.model : "关闭") + "；语音：" + (rc.voice.enabled ? rc.voice.voice : "关闭"));
+
 const runtime = createRuntime({
-  config: cfg, runtime: rc, store: store, bot: bot, search: searchSvc, memes: memes,
+  config: cfg, runtime: rc, store: store, bot: bot, search: searchSvc, memes: memes, vision: vision, tts: tts,
+  imageDir: path.join(BRAIN_TMP_DIR, "images"),
+  sendRecord: function (gid, file) { log("→语音 " + gid + " : " + path.basename(file)); return ob.sendGroupRecord(gid, file); },
   sendImage: function (gid, file) { log("→图 " + gid + " : " + path.basename(file)); return ob.sendGroupImage(gid, file); },
   evtDefaults: { botNames: [persona.botName], nicknames: [persona.botName], interests: persona.interests, dislikes: persona.dislikes },
   send: function (gid, text) { log("→ " + gid + " : " + text); return ob.sendGroupMsg(gid, text); },

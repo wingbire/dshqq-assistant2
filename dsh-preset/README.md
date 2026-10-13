@@ -1,45 +1,37 @@
-# qq-brain preset 安装说明
+# 三档 preset（已被取代，留作历史）
 
-## 为什么需要独立的 profile
+> **结论：这里的三个 `*.preset.yml` 不能被 `dsh --patch` 使用，也不要再用它们。**
 
-实测（本机）：
+## 为什么
 
-- `dsh --profile desktop headless ...` → **报错：profile "desktop" is managed exclusively by the Electron application**（桌面主 profile 不能从 CLI 启动）
-- `dsh headless ...`（不带 profile）→ 会尝试**新建** `C:/Users/13518/.dsh/profiles/headless/cordis.yml`，在本会话沙箱下报 **EPERM**（`~/.dsh` 在工作区之外）
-- `dsh --version` → **0.2.0-rc.2**（CLI 本身可用）
-- `E:/DeepseekHarness/resources/runtime/cli/bin/dsh.cmd` 内容就是把 Electron 当 Node 跑 `app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js`
+DSH 的 `--patch` 只接受**顶层是 loader patch 数组**的 YAML：
 
-**结论：大脑需要一个专用的、非 Electron 托管的 profile（建议叫 `qq-brain`），由你来创建。**
+    [ { "id": "system-prompt", "config": { "personaPrefix": "…" } } ]
 
-## 安装步骤（用户执行，一次）
+而这三个文件是「agent preset 形状」（顶层是 `id/name/systemPrompt/agent/tools/invocation` 的映射），
+还带了 `personaPrefixFile` / `invocation` / `tools.enabled` 这些 **DSH 根本不认识的键**（是当时设计装配器时设想出来的）。
+实测直接报错：
 
-    # 1. 从官方模板派生一个专用 profile（模板名以 dsh 实际提供为准）
-    dsh qq-brain --from-default-profile headless
+    $ dsh --profile qq-brain --patch dsh-preset/qq-brain-low.preset.yml --dump-config
+    Error: dsh: overlay … must be a top-level YAML array of loader patch entries
 
-    # 2. 确认它能起来
-    dsh --profile qq-brain --dump-config
+## 现在实际怎么做的
 
-    # 3. 把三个档位的 preset 叠加进去（重复 --patch 可叠加）
-    dsh --profile qq-brain --patch 程序架构/dsh-preset/qq-brain-low.preset.yml headless "在吗"
+程序启动时会自己往**工作区内的 DSH_HOME** 里写 profile 与三档 overlay（见 `app/src/dshprofile.js`）：
 
-三个档位的分工：
+    app/dsh-home/profiles/qq-brain/
+      cordis.patch.yml      ← 人设（personaPrefix），三档共用、字节完全一致 → 前缀缓存跨档共享
+      tier-low.patch.yml    ← agent-default-model.config.reasoningEffort = off
+      tier-mid.patch.yml    ← low
+      tier-high.patch.yml   ← high
 
-| preset | reasoningEffort | maxTokens | 用途 |
-|---|---|---|---|
-| qq-brain-off.preset.yml | off | 128 | 短评（≤20 字）——通常本地短句就够，不一定调 |
-| qq-brain-low.preset.yml | low | 256 | 总结（≤60 字） |
-| qq-brain-high.preset.yml | high | 1024 | 详细（≥200 字），配合搜索与外审 |
+调用形状：
 
-## 字段来源说明（诚实标注）
+    dsh --profile qq-brain --patch tier-mid.patch.yml headless --json "<本轮任务>"
 
-- `provider` / `model` / `reasoningEffort` / `maxTokens`：来自内核类型声明
-  `dsh-agent-preset-registry` 的 `AgentOptions` 与 `LlmCallConfig`（**已核对**）
-- `personaPrefix` / `personaSuffix` / `toolOrder`：来自 `dsh-system-prompt` 的 `Config`（**已核对**，第 203–207 行）
-- `includeRuntimeContext` / `includeHarnessIdentity`：同上（**已核对**）
-- `personaPrefixFile` / `invocation` / `tools.enabled`：**我提出的装配层字段**，需要你的装配器（brain.js）来读取；DSH 本身不认识这两个键，别指望 DSH 直接吃
+这样做的好处是**人设前缀在三个档之间逐字节相同**，缓存能跨档命中；用三个独立 profile 反而会各自一份脚手架、各自一份会话状态。
 
-## 缓存友好性的三条硬约束（务必守住）
+## 实测（2026-10-14）
 
-1. **人设只放 personaPrefix**，不要放 suffix，也不要在人设里插每轮会变的东西
-2. **工具面固定**：这个 preset 不开任何工具（`enabled: []`），否则工具说明中段变动会打散缓存
-3. **动态内容不要进 system**：群档案、上下文、本轮任务作为**消息体**传入，而不是拼进系统提示词
+- `reasoningEffort` 会被 `dsh-agent-default-model` 接受并出现在合成配置里，真实调用 EXIT=0
+- 同一 profile 连打两次，前缀缓存命中率 **96.1% / 94.0%**

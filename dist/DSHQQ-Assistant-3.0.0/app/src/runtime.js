@@ -4,6 +4,8 @@ import { createBudget } from "./budget.js";
 import { createBrakes } from "./brakes.js";
 import { createDefaultCommands } from "./commands.js";
 import { createMemeLibrary, shouldAttachMeme } from "./meme.js";
+import { resolveLocalImage, downloadImage, injectVision } from "./vision.js";
+import { parseVoiceTag } from "./tts.js";
 import { localReply } from "./localreply.js";
 import { depthPolicy, buildTaskText } from "./brain.js";
 import { parseMeme } from "./audit.js";
@@ -23,6 +25,10 @@ export function createRuntime(deps) {
   const askBrain = d.askBrain || null;
   const searchSvc = d.search || null;
   const memes = d.memes || createMemeLibrary({});
+  const vision = d.vision || null;              // N18：识图（独立一次多模态调用）
+  const tts = d.tts || null;                    // N18：TTS → NapCat 发语音
+  const sendRecord = d.sendRecord || null;
+  const imageDir = d.imageDir || null;          // 下载下来的图片落哪儿
   const sendImage = d.sendImage || null;
   const repliesSinceMeme = new Map();      // gid -> 距上次配图过了几次回复（「少」档要拉开间隔）
   const now = d.now || function () { return Date.now(); };
@@ -47,8 +53,22 @@ export function createRuntime(deps) {
   const brakes = d.brakes || createBrakes({ config: cfg, now: now });
   // 指令注册表要拿到真的 brakes / budget，所以必须在这两行之后建
   const commands = d.commands || createDefaultCommands({ brakes: brakes, budget: budget, now: now, stopMinutes: rc.stopMinutes || 60 });
+  // N18：/说 用来试 TTS（指令清单整体留空，所以这条也走注册表加）
+  if (!commands.find("说") && !commands.find("say")) {
+    commands.register({
+      name: "说", aliases: ["say"], perm: "admin", action: "tts", help: "让小助手用语音说一句话（测试 TTS）",
+      handler: function (a) {
+        if (!tts || !tts.enabled()) return { reply: "语音没开（配置端 → 运行时 → 启用语音）" };
+        const text = String(a.args || "").trim();
+        if (!text) return { reply: "用法：/说 要念的内容" };
+        const r = speak(a.evt.gid, text);
+        if (!r.ok) return { reply: "TTS 失败：" + r.error };
+        return { reply: null, bytes: r.bytes };
+      }
+    });
+  }
 
-  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0, memesSent: 0, memesMissed: 0, memesSuppressed: 0, proactiveTried: 0, proactiveSpoken: 0, proactiveBlocked: 0 };
+  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0, memesSent: 0, memesMissed: 0, memesSuppressed: 0, proactiveTried: 0, proactiveSpoken: 0, proactiveBlocked: 0, visionCalls: 0, visionOk: 0, visionFail: 0, voiceSent: 0, voiceFailed: 0 };
   let busy = false;
 
   function observe(rec) {
@@ -103,6 +123,40 @@ export function createRuntime(deps) {
     stats.memesSent += 1;
     repliesSinceMeme.set(key, 0);
     return { tag: hit.tag, file: hit.file, score: hit.score, mood: mood, reason: gate.reason };
+  }
+
+  // N18 识图：把这一批里的图片描述出来（最多 2 张），拼进本轮上下文
+  async function describeImages(batch) {
+    if (!vision || !vision.enabled()) return [];
+    const imgs = [];
+    for (const e of batch.evts) for (const im of (e.images || [])) imgs.push(im);
+    if (!imgs.length) return [];
+    const out = [];
+    for (const im of imgs.slice(0, 2)) {
+      let local = resolveLocalImage(im, { maxBytes: (rc.vision && rc.vision.maxBytes) || undefined });
+      if (!local.ok && local.needDownload && im.url && imageDir) local = await downloadImage(im.url, imageDir, {});
+      if (!local.ok && im.url && imageDir) local = await downloadImage(im.url, imageDir, {});
+      stats.visionCalls += 1;
+      const r = await vision.describe(local, {});
+      if (r.ok) { stats.visionOk += 1; out.push(r.text); }
+      else { stats.visionFail += 1; observe({ kind: "vision_fail", gid: batch.gid, error: r.error, file: (im.file || im.url || "").slice(0, 80) }); }
+    }
+    return out;
+  }
+
+  // N18：TTS 统一入口 —— 指令与 [语音:] 标记都走这里，计数与失败上报只有一处
+  function speak(gid, text) {
+    if (!tts || !tts.enabled()) return { ok: false, error: "语音未启用" };
+    const v = tts.synthesize(text);
+    if (!v.ok) {
+      stats.voiceFailed += 1;
+      observe({ kind: "voice_fail", gid: gid, error: v.error });
+      return { ok: false, error: v.error };
+    }
+    if (sendRecord) sendRecord(gid, v.file);
+    stats.voiceSent += 1;
+    observe({ kind: "voice_sent", gid: gid, chars: v.chars, bytes: v.bytes });
+    return { ok: true, chars: v.chars, bytes: v.bytes, file: v.file };
   }
 
   function groupInterests(gid) {
@@ -257,10 +311,12 @@ export function createRuntime(deps) {
     }
     // N23：整批当成一轮来判定 —— 这样这一串里任何一条带 @/回复的硬触发都能生效；
     // 锚点仍取「最近一条单独判定过得去的」，用于把这次回复归属到具体那个人/那条消息。
+    const visionTexts = await describeImages(batch);
+    const baseText = batch.plainText || batch.text;
     const mergedEvt = Object.assign({}, evtDefaults, lastBot.get(String(batch.gid)) || {}, {
       gid: batch.gid, uid: batch.uid,
       speaker: (batch.evts[batch.evts.length - 1] || {}).speaker || "",
-      text: batch.plainText || batch.text,
+      text: visionTexts.length ? injectVision(baseText, visionTexts) : baseText,
       atBot: !!batch.atBot, replyToBot: !!batch.replyToBot,
       now: batch.lastAt, mergedCount: batch.count
     });
@@ -333,6 +389,7 @@ export function createRuntime(deps) {
       if (pb) blocks.push(pb);
       const ctxBlock = contextBlock(evt.gid);
       if (ctxBlock) blocks.push(ctxBlock);
+      if (visionTexts.length) blocks.push(injectVision("", visionTexts).trim());
       const prompt = blocks.filter(Boolean).join(String.fromCharCode(10, 10));
       stats.brainCalls += 1;
       const r = await askBrain({ promptText: prompt, tier: dec.tier, decision: dec, evt: evt });
@@ -347,7 +404,8 @@ export function createRuntime(deps) {
       return { gid: batch.gid, action: "noop" };
     }
 
-    const parsed = parseMeme(text || "");
+    const voiced = parseVoiceTag(text || "");        // N18：先摘 [语音: 文本]
+    const parsed = parseMeme(voiced.text);
     const segments = splitReply(parsed.text, dec.maxChars || 60, { maxSegments: rc.maxSegments });
     const sent = [];
     for (let i = 0; i < segments.length; i++) {
@@ -356,6 +414,12 @@ export function createRuntime(deps) {
       sent.push(segments[i]);
       stats.segments += 1;
       if (i < segments.length - 1 && sendGapMs > 0) await sleep(sendGapMs);
+    }
+    // N18：语音（默认关闭）—— 有标记才念，念不出来不影响正文
+    let voiceInfo = null;
+    if (voiced.voice) {
+      const v = speak(evt.gid, voiced.voice);
+      voiceInfo = v.ok ? { chars: v.chars, bytes: v.bytes } : { error: v.error };
     }
     const memeInfo = await attachMeme(evt.gid, parsed.mood, dec.tier);
     stats.replies += 1;
@@ -370,9 +434,9 @@ export function createRuntime(deps) {
     observe({
       kind: "sent", gid: batch.gid, uid: batch.uid, speaker: evt.speaker, tier: dec.tier,
       mergedCount: batch.count, mood: parsed.mood || null, memePending: parsed.mood || null,
-      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo, meme: memeInfo
+      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo, meme: memeInfo, voice: voiceInfo, vision: visionTexts.length ? visionTexts : null
     });
-    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo, meme: memeInfo };
+    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo, meme: memeInfo, voice: voiceInfo, vision: visionTexts.length ? visionTexts : null };
   }
 
   function r0(usage) {

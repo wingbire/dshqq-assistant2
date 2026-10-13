@@ -48,9 +48,17 @@ export function normalizeEvent(raw, ctx) {
       if (c.sentIds && c.sentIds.has(id)) replyToBot = true; else replyToOther = true;
     }
   }
+  // 图片 / 语音 / 视频也算「有内容」—— 纯图片消息不能因为没文字就被丢掉（N18 识图要用）
+  const images = [];
+  let hasRich = false;
+  for (const s of segs) {
+    if (!s || typeof s !== "object") continue;
+    if (s.type === "image") { hasRich = true; images.push({ file: String((s.data || {}).file || ""), url: String((s.data || {}).url || "") }); }
+    else if (s.type === "record" || s.type === "video" || s.type === "face" || s.type === "file") hasRich = true;
+  }
   let text = texts.join("").trim();
-  if (!text && typeof raw.raw_message === "string") text = raw.raw_message.replace(/\[CQ:at,[^\]]*\]/g, "").trim();
-  if (!text) return null;
+  if (!text && typeof raw.raw_message === "string") text = raw.raw_message.replace(/\[CQ:(at|image|record|face),[^\]]*\]/g, "").trim();
+  if (!text && !hasRich) return null;
 
   const sender = raw.sender || {};
   const speaker = normalizeName(sender.card || sender.nickname || uid);
@@ -67,6 +75,9 @@ export function normalizeEvent(raw, ctx) {
     replyToOther: replyToOther,
     messageId: raw.message_id != null ? String(raw.message_id) : null,
     role: String(sender.role || ""),
+    segments: segs,
+    images: images,
+    hasImage: images.length > 0,
     now: c.now != null ? c.now : Date.now()
   };
 }
@@ -170,6 +181,21 @@ export function createOneBot(opts) {
     return send({ action: "send_group_msg", params: { group_id: Number(gid), message: [{ type: "image", data: { file: p } }] }, echo: echo });
   }
 
+  // 发语音（OneBot v11 的 record 段）。NapCat 认本地绝对路径或 base64://
+  function sendGroupRecord(gid, file) {
+    if (!file) return false;
+    const echo = "dshqq-rec-" + nowFn() + "-" + Math.floor(Math.random() * 1e6);
+    const p = String(file).replace(/\\/g, "/");
+    return send({ action: "send_group_msg", params: { group_id: Number(gid), message: [{ type: "record", data: { file: p } }] }, echo: echo });
+  }
+
+  // 通用动作调用（取图片、取群成员等）
+  function callAction(action, params) {
+    const echo = "dshqq-act-" + nowFn() + "-" + Math.floor(Math.random() * 1e6);
+    send({ action: action, params: params || {}, echo: echo });
+    return echo;
+  }
+
   function close() {
     stopped = true;
     if (timer) clearTimeout(timer);
@@ -179,6 +205,7 @@ export function createOneBot(opts) {
 
   return {
     connect: connect, close: close, send: send, sendGroupMsg: sendGroupMsg, sendGroupImage: sendGroupImage,
+    sendGroupRecord: sendGroupRecord, callAction: callAction,
     state: function () { return state; }, selfId: function () { return selfId; },
     sentIds: sentIds, seenCount: function () { return seen.size; },
     config: cfg

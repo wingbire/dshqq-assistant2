@@ -118,6 +118,22 @@ export function runtimeConfig(cfg) {
       maxPerHour: getPath(c, "autojoin.maxPerHour") != null ? getPath(c, "autojoin.maxPerHour") : 6,
       maxChars: 20
     },
+    vision: {                                                       // N18：识图走独立一次多模态调用
+      enabled: getPath(c, "runtime.vision.enabled") === true,
+      mode: getPath(c, "runtime.vision.mode") || "off",              // off | http | dsh
+      endpoint: getPath(c, "runtime.vision.endpoint") || "",
+      apiKey: getPath(c, "runtime.vision.apiKey") || "",
+      model: getPath(c, "runtime.vision.model") || "mimo-v2.6-flash-free",
+      profile: getPath(c, "runtime.vision.profile") || "qq-vision",
+      timeoutMs: getPath(c, "runtime.vision.timeoutMs") || 20000,
+      maxChars: getPath(c, "runtime.vision.maxChars") || 300
+    },
+    voice: {                                                        // N18：TTS 用 Windows 自带 SAPI
+      enabled: getPath(c, "runtime.voice.enabled") === true,
+      voice: getPath(c, "runtime.voice.voice") || "Microsoft Huihui",
+      rate: getPath(c, "runtime.voice.rate") || 0,
+      maxChars: getPath(c, "runtime.voice.maxChars") || 60
+    },
     webuiEnabled: getPath(c, "runtime.webui.enabled") !== false,
     webuiPort: getPath(c, "runtime.webui.port") != null ? getPath(c, "runtime.webui.port") : 8799,
     autojoinRate: getPath(c, "autojoin.rate") != null ? getPath(c, "autojoin.rate") : 0.25,
