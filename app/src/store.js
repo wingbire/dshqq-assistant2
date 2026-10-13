@@ -115,6 +115,8 @@ export function createStore(root, limits) {
 
   ensureDir(paths.profiles);
   ensureDir(brainDir);
+  // 存储契约 §一：schema 快照在启动时写（此前只实现了函数、从没被调用）
+  try { if (!fs.existsSync(paths.schema)) writeSchema({ writtenBy: "createStore" }); } catch (e) {}
 
   return {
     paths: paths, limits: lim, schemaVersion: SCHEMA_VERSION,

@@ -5,6 +5,10 @@ import { engagementOf, reward, costOf } from "../app/src/score.js";
 import { createProactive } from "../app/src/proactive.js";
 import { createStore } from "../app/src/store.js";
 import { createAddressee } from "../app/src/addressee.js";
+import { parseEvents, buildArgs, brainEnv, cacheHitRate, PROFILE_DEFAULT, DEPTH_POLICY_DEFAULT } from "../app/src/brain.js";
+import { maskKey, parseRefsApiKey, pickApiKey, loadSecrets, saveSecrets } from "../app/src/secrets.js";
+import { buildPersonaText, renderProfilePatch, writeProfilePatch, DEFAULT_PERSONA, PROFILE_ID } from "../app/src/dshprofile.js";
+import { DATA_ROOT, DSH_HOME, APP_ROOT, BRAIN_TMP_DIR } from "../app/src/paths.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
@@ -206,6 +210,126 @@ t("bandit: 落盘后恢复，且恢复后跨群仍隔离", function () {
   eq(Object.keys(b2.state()).every(function (k) { return k.indexOf("|") === 1 || k.split("|")[0] === "A" || k.split("|")[0] === "B"; }), true);
   const pickB = b2.choose("question", "A");
   ok(pickB.detail.some(function (x) { return x.n === 4; }), "A 的样本数应为 4（未被 B 污染）");
+});
+
+// ===== P0：大脑通道与真实 CLI 对齐 =====
+
+t("brain: 解析真实 CLI 事件（final 优先）", function () {
+  const raw = [
+    '{"type":"session","sessionId":"s1"}',
+    '{"type":"status","phase":"turn_start","turn":1}',
+    '{"type":"thinking","text":""}',
+    '{"type":"text","text":"我到了"}',
+    '{"type":"status","phase":"step_end","turn":1,"step":1,"usage":{"inputTokens":5646,"outputTokens":3,"cacheReadTokens":384,"cacheWriteTokens":0,"totalTokens":6033}}',
+    '{"type":"status","phase":"turn_end","turn":1,"reason":{"kind":"completed"}}',
+    '{"type":"final","text":"我到了"}'
+  ].join(String.fromCharCode(10));
+  const p = parseEvents(raw);
+  eq(p.text, "我到了");
+  eq(p.sessionId, "s1");
+  eq(p.steps, 1);
+  eq(p.usage.inputTokens, 5646);
+  eq(p.error, null);
+});
+
+t("brain: 没有 final 时回落到 text 片段", function () {
+  const raw = '{"type":"text","text":"前半"}' + String.fromCharCode(10) + '{"type":"text","text":"后半"}';
+  eq(parseEvents(raw).text, "前半后半");
+});
+
+t("brain: 裸文本兜底（mock CLI 形状不回归）", function () {
+  const raw = '{"type":"status","phase":"step_end","usage":{"inputTokens":127,"outputTokens":45,"cacheReadTokens":1000,"cacheWriteTokens":90}}'
+    + String.fromCharCode(10) + "我上次也卡这儿。" + String.fromCharCode(10) + '{"type":"status","phase":"session_end"}';
+  const p = parseEvents(raw);
+  eq(p.text, "我上次也卡这儿。");
+  eq(p.usage.cacheReadTokens, 1000);
+  eq(Math.round(cacheHitRate(p.usage) * 1000) / 10, 82.2);
+});
+
+t("brain: turn_end 的错误会被识别", function () {
+  const raw = '{"type":"status","phase":"turn_end","reason":{"kind":"error","error":{"message":"no API key","code":"MISSING_CREDENTIAL"}}}';
+  ok(String(parseEvents(raw).error).includes("no API key"));
+});
+
+t("brain: buildArgs 带 profile 与 --json，任务在最后", function () {
+  const args = buildArgs({ launch: { cliJs: "C:/x/cli.js" }, profile: "qq-brain", appName: "headless", promptText: "在吗" });
+  eq(args[args.length - 1], "在吗");
+  ok(args.includes("--json"), "应带 --json 才能拿到 usage");
+  ok(args.includes("qq-brain"), "应带 profile");
+  eq(args[args.indexOf("--profile") + 1], "qq-brain");
+  eq(args.indexOf("--json") < args.indexOf("在吗"), true, "--json 必须在任务文本之前（headless 只把最后一个位置当任务）");
+});
+
+t("brain: brainEnv 注入 DSH_HOME 与密钥", function () {
+  const env = brainEnv({ dshHome: "C:/ws/app/dsh-home", apiKey: "sk-test-1234567890" });
+  eq(env.DSH_HOME, "C:/ws/app/dsh-home");
+  eq(env.DEEPSEEK_API_KEY, "sk-test-1234567890");
+  const env2 = brainEnv({ dshHome: "C:/ws/app/dsh-home", apiKey: null, env: {} });
+  eq(env2.DEEPSEEK_API_KEY, undefined, "没有密钥时不应乱塞");
+});
+
+t("brain: 默认 profile 名与实际 profile 一致", function () { eq(PROFILE_DEFAULT, PROFILE_ID); eq(PROFILE_DEFAULT, "qq-brain"); });
+
+t("brain: N8 决策——进 prompt 的上下文窗口为 10", function () {
+  eq(DEPTH_POLICY_DEFAULT.mid.contextWindow, 10);
+  eq(DEPTH_POLICY_DEFAULT.high.contextWindow, 10);
+});
+
+t("dshprofile: 人设文本逐字节稳定", function () {
+  const a = buildPersonaText(DEFAULT_PERSONA);
+  const b = buildPersonaText(Object.assign({}, DEFAULT_PERSONA));
+  eq(a, b);
+  ok(a.includes("小肥鱼"));
+  ok(a.includes("【身份内核】"));
+  ok(!/\d{4}-\d{2}-\d{2}/.test(a), "人设里不能有时间戳，否则前缀缓存永远不命中");
+});
+
+t("dshprofile: patch 是 loader 数组且人设落在 personaPrefix", function () {
+  const patch = JSON.parse(renderProfilePatch("【测试】人设"));
+  eq(Array.isArray(patch), true);
+  eq(patch.length, 1);
+  eq(patch[0].id, "system-prompt");
+  eq(patch[0].config.personaPrefix, "【测试】人设");
+  eq(patch[0].config.includeHarnessIdentity, false);
+});
+
+t("dshprofile: writeProfilePatch 落盘可回读", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "prof-" + Date.now());
+  const file = writeProfilePatch(dir, "qq-brain", "【落盘】人设");
+  ok(fs.existsSync(file));
+  eq(JSON.parse(fs.readFileSync(file, "utf8"))[0].config.personaPrefix, "【落盘】人设");
+});
+
+t("secrets: maskKey 不泄露明文", function () {
+  eq(maskKey(""), null);
+  eq(maskKey("short"), "***");
+  const m = maskKey("sk-TESTFIXTURE0000000000000000000000");
+  ok(m.startsWith("sk-843"));
+  ok(!m.includes("654abb"), "中段必须被遮住");
+});
+
+t("secrets: parseRefsApiKey 只认 refs 块里的目标键", function () {
+  const yaml = ["version: 1", "refs:", "  DEEPSEEK_API_KEY: sk-abc123456789", "  OTHER: zzz", "records:", "  DEEPSEEK_API_KEY: should-not-win"].join(String.fromCharCode(10));
+  eq(parseRefsApiKey(yaml), "sk-abc123456789");
+  eq(parseRefsApiKey("records:" + String.fromCharCode(10) + "  DEEPSEEK_API_KEY: nope"), null);
+  eq(parseRefsApiKey('refs:' + String.fromCharCode(10) + '  DEEPSEEK_API_KEY: "sk-quoted"'), "sk-quoted");
+});
+
+t("secrets: pickApiKey 文件优先于环境变量", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "sec-" + Date.now());
+  const f = path.join(dir, "secrets.json");
+  saveSecrets({ deepseekApiKey: "sk-from-file" }, f);
+  eq(pickApiKey({ DEEPSEEK_API_KEY: "sk-from-env" }, f), "sk-from-file");
+  eq(pickApiKey({ DEEPSEEK_API_KEY: "sk-from-env" }, path.join(dir, "missing.json")), "sk-from-env");
+  eq(pickApiKey({}, path.join(dir, "missing.json")), null);
+  eq(loadSecrets(f).deepseekApiKey, "sk-from-file");
+});
+
+t("paths: 数据根稳定指向 <工作区>/app/dsh-data", function () {
+  ok(APP_ROOT.endsWith("app"), "APP_ROOT 应是 app 目录，实得 " + APP_ROOT);
+  eq(DATA_ROOT, path.join(APP_ROOT, "dsh-data"));
+  ok(BRAIN_TMP_DIR.startsWith(DATA_ROOT), "brain 临时目录必须在数据根内（原实现在 cwd 下）");
+  ok(DSH_HOME.endsWith("dsh-home") || !!process.env.DSHQQ_DSH_HOME, "DSH_HOME 应落在程序目录内");
 });
 
 console.log("=== 骨架回归测试 ===");
