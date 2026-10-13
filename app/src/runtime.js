@@ -202,7 +202,18 @@ export function createRuntime(deps) {
     // P3：这条消息同时是「上一条回复」的判决书 —— 先结算
     settle(tracker.resolve(evt), evt.now);
     const st = brakes.state(evt.gid, evt.now);
-    if (st.stopped) { stats.stopped += 1; return { action: "stopped", reason: st.reason }; }
+    if (st.stopped) {
+      // 「群内指令暂停」必须能被指令解开，否则一停就再也开不回来。
+      // STOP 文件与配置暂停仍然是最高优先，什么指令都进不来。
+      const parsed = commands.parse(evt.text);
+      const spec = parsed ? commands.find(parsed.name) : null;
+      const canUnstick = st.reason === "群内指令暂停" && !!spec;
+      if (!canUnstick) {
+        stats.stopped += 1;
+        observe({ kind: "stopped", gid: evt.gid, reason: st.reason });
+        return { action: "stopped", reason: st.reason };
+      }
+    }
 
     // N17：指令走注册表 —— 权限判定与二次确认都在 commands.js 里
     const cRes = commands.dispatch(evt, { config: adminConfig(), budget: budget, brakes: brakes, store: store });

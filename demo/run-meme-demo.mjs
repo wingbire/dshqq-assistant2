@@ -94,12 +94,19 @@ check("指令都进了 observation", store.readJsonl(store.paths.observe).some(f
 
 console.log("");
 console.log("=== ④ 主动搭话（全自动阶段 + 兴趣命中）===");
-srv.groupMessage({ group_id: GID, user_id: 2003, nickname: "丙", segments: [{ type: "text", data: { text: "哈哈这波操作太典了笑死" } }] });
+// 放开兴趣与概率，确保这一段真的能走到主动搭话（真实运行时由群档案兴趣决定）
+// 换一个干净的群：刚刚回过话的群会因「连续性」特征把 p_say 抬上去，那条就不会被判否了
+bot.proactive.config().requireInterest = false;
+bot.proactive.config().rate = 1;
+brainText = "我也在玩这个。";
+const GID2 = "111222333";
+srv.groupMessage({ group_id: GID2, user_id: 2003, nickname: "丙", segments: [{ type: "text", data: { text: "他说这个副本要打三遍才行，他说他会带我们" } }] });
 await drive(rt, 1200);
 const pro = store.readJsonl(store.paths.observe).filter(function (x) { return x.kind === "proactive_sent" || x.kind === "proactive_error"; });
 console.log("     主动搭话记录：" + JSON.stringify(pro.slice(-2)));
 console.log("     统计：" + JSON.stringify({ tried: rt.stats().proactiveTried, spoken: rt.stats().proactiveSpoken, blocked: rt.stats().proactiveBlocked }));
-check("主动搭话路径可达（有说话或明确被拦）", rt.stats().proactiveTried + rt.stats().proactiveBlocked >= 0, "tried=" + rt.stats().proactiveTried);
+check("主动搭话真的插了一句（全自动阶段）", rt.stats().proactiveSpoken === 1, "spoken=" + rt.stats().proactiveSpoken);
+check("插话内容进了 observation", pro.length >= 1 && pro[pro.length - 1].kind === "proactive_sent", JSON.stringify(pro[pro.length - 1] || null));
 
 ob.close();
 await srv.close();
