@@ -30,6 +30,7 @@ export function createStore(root, limits) {
     bandit: path.join(dataDir, "bandit-state.json"),
     cache: path.join(dataDir, "reply-cache.json"),
     schema: path.join(dataDir, "schema.json"),
+    observe: path.join(dataDir, "observation.jsonl"),
     brain: brainDir
   };
 
@@ -128,6 +129,7 @@ export function createStore(root, limits) {
     loadBandit: function () { return readJson(paths.bandit, null); },
     saveBandit: function (s) { return writeJson(paths.bandit, s); },
     addLabel: function (rec) { return appendJsonl(paths.labels, Object.assign({ at: new Date().toISOString() }, rec), { maxLines: 2000 }); },
+    addObservation: function (rec) { return appendJsonl(paths.observe, Object.assign({ at: new Date().toISOString() }, rec)); },
     pruneProfiles: pruneProfiles, pruneBrainTemp: pruneBrainTemp, writeSchema: writeSchema
   };
 }

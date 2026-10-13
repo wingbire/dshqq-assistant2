@@ -27,6 +27,28 @@ export const DEFAULT_PERSONA = {
   memeRate: "只在情绪明确时配一张，正式解释不配图"
 };
 
+// 配置端字段（persona.tone 等是枚举）→ 人设文本用的自然语言。纯函数。
+export const TONE_TEXT = { "精炼": "口语、短句、有起伏", "详细": "口语但愿意展开，先说结论再补细节" };
+export const OVERFLOW_TEXT = {
+  "压缩成一条": "话太长时压成一条短的",
+  "拆两条": "话太长时先在句号处断开，分两条发"          // N6 决策
+};
+export const MEME_FREQ_TEXT = { "关": "不配图", "少": "只在情绪明确时配一张，正式解释不配图", "中": "情绪到位就配一张，一条最多 1 张" };
+
+export function personaFromConfig(cfg) {
+  const p = (cfg && cfg.persona) || {};
+  return {
+    botName: p.botName || DEFAULT_PERSONA.botName,
+    age: p.age || DEFAULT_PERSONA.age,
+    traits: (p.traits && p.traits.length) ? p.traits : DEFAULT_PERSONA.traits,
+    interests: p.interests || [],
+    dislikes: p.dislikes || [],
+    tone: TONE_TEXT[p.tone] || DEFAULT_PERSONA.tone,
+    overflow: OVERFLOW_TEXT[p.overflow] || DEFAULT_PERSONA.overflow,
+    memeRate: MEME_FREQ_TEXT[p.memeFreq] || DEFAULT_PERSONA.memeRate
+  };
+}
+
 // 纯函数：同一份 persona 必须产出逐字节相同的文本（前缀缓存的前提，禁止时间戳/随机数）。
 export function buildPersonaText(persona, cfg) {
   const p = Object.assign({}, DEFAULT_PERSONA, persona || {});

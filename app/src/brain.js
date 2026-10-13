@@ -177,7 +177,8 @@ export function brainEnv(o) {
   const opts = o || {};
   const env = Object.assign({}, process.env, opts.env || {});
   env.DSH_HOME = opts.dshHome || DSH_HOME;          // N1：profile 与状态落工作区，零写入 ~/.dsh
-  const key = opts.apiKey !== undefined && opts.apiKey !== null ? opts.apiKey : pickApiKey();
+  // apiKey 语义：undefined = 自动取（工作区文件 > 环境变量）；null = 明确不要；字符串 = 就用它
+  const key = opts.apiKey === undefined ? pickApiKey() : opts.apiKey;
   if (key) env.DEEPSEEK_API_KEY = key;              // 凭据只经环境变量传给子进程
   return env;
 }

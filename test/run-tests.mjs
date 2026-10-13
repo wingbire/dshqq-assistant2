@@ -9,13 +9,27 @@ import { parseEvents, buildArgs, brainEnv, cacheHitRate, PROFILE_DEFAULT, DEPTH_
 import { maskKey, parseRefsApiKey, pickApiKey, loadSecrets, saveSecrets } from "../app/src/secrets.js";
 import { buildPersonaText, renderProfilePatch, writeProfilePatch, DEFAULT_PERSONA, PROFILE_ID } from "../app/src/dshprofile.js";
 import { DATA_ROOT, DSH_HOME, APP_ROOT, BRAIN_TMP_DIR } from "../app/src/paths.js";
+import { splitReply, splitSentences, cutAtSentence } from "../app/src/split.js";
+import { createCoalescer, mergeBucket, pickAnchor } from "../app/src/coalesce.js";
+import { createBudget, dayKeyOf } from "../app/src/budget.js";
+import { createBrakes, parseAdminCommand, isAdmin } from "../app/src/brakes.js";
+import { createOneBot, normalizeEvent, withToken } from "../app/src/onebot.js";
+import { createRuntime } from "../app/src/runtime.js";
+import { defaultsFromTable, redactConfig, runtimeConfig, setPath, getPath, deepMerge, loadFieldTable } from "../app/src/config.js";
 import fs from "node:fs";
 import os from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
-let pass = 0; const fails = [];
-function t(name, fn) { try { fn(); pass += 1; } catch (e) { fails.push(name + " :: " + String(e && e.message).slice(0, 160)); } }
+let pass = 0; const fails = []; const pendingTests = [];
+function failTest(name, e) { fails.push(name + " :: " + String(e && e.message).slice(0, 160)); }
+function t(name, fn) {
+  try {
+    const r = fn();
+    if (r && typeof r.then === "function") { pendingTests.push(r.then(function () { pass += 1; }, function (e) { failTest(name, e); })); return; }
+    pass += 1;
+  } catch (e) { failTest(name, e); }
+}
 function eq(a, b, msg) { if (JSON.stringify(a) !== JSON.stringify(b)) throw new Error((msg || "") + " 期望 " + JSON.stringify(b) + " 实得 " + JSON.stringify(a)); }
 function ok(v, msg) { if (!v) throw new Error(msg || "应为真"); }
 
@@ -332,6 +346,293 @@ t("paths: 数据根稳定指向 <工作区>/app/dsh-data", function () {
   ok(DSH_HOME.endsWith("dsh-home") || !!process.env.DSHQQ_DSH_HOME, "DSH_HOME 应落在程序目录内");
 });
 
+// ===== P1：接入层（N6 分条 / N23 合并与预算 / N10 刹车 / OneBot）=====
+
+t("split: 短回复不分条", function () {
+  eq(splitReply("在的", 20), ["在的"]);
+});
+
+t("split: 按句号切多条且每条不超上限", function () {
+  const text = "第一句话就是这样。第二句话稍微长一点点了。第三句话也不短啊。";
+  const segs = splitReply(text, 12, { maxSegments: 3 });
+  ok(segs.length >= 2, "应切成多条，实得 " + segs.length);
+  for (const s of segs) ok(s.length <= 12, "每段不超上限，实得 " + s.length + " :: " + s);
+  eq(segs.join(""), text);
+});
+
+t("split: 单句超长时在句末截断", function () {
+  const long = "这是一个特别特别特别长的句子没有句号一直写下去写下去写下去";
+  const segs = splitReply(long, 10);
+  ok(segs[0].length <= 10);
+});
+
+t("split: 超过 maxSegments 时余下并入最后一条", function () {
+  const text = "一。二。三。四。五。六。";
+  const segs = splitReply(text, 2, { maxSegments: 2 });
+  eq(segs.length, 2);
+  ok(segs[1].length <= 2, "并入后仍受上限约束");
+});
+
+t("split: 句末标点切分本身正确", function () {
+  eq(splitSentences("甲。乙！丙？"), ["甲。", "乙！", "丙？"]);
+  eq(cutAtSentence("甲乙丙丁戊", 3), "甲乙丙");
+});
+
+t("coalesce: 窗口内同人连发合并成一批", function () {
+  const c = createCoalescer({ windowMs: 1000, maxBatch: 5 });
+  c.push({ gid: "A", uid: "u1", text: "在吗", now: 0, speaker: "甲" });
+  c.push({ gid: "A", uid: "u1", text: "帮我看看", now: 200, speaker: "甲" });
+  eq(c.flushDue(500).length, 0, "还没静默够，不成批");
+  const out = c.flushDue(1300);
+  eq(out.length, 1);
+  eq(out[0].count, 2);
+  ok(out[0].text.includes("甲：在吗"));
+  ok(out[0].text.includes("甲：帮我看看"));
+});
+
+t("coalesce: 不同人各自成批", function () {
+  const c = createCoalescer({ windowMs: 100, maxBatch: 5 });
+  c.push({ gid: "A", uid: "u1", text: "1", now: 0 });
+  c.push({ gid: "A", uid: "u2", text: "2", now: 0 });
+  eq(c.flushDue(200).length, 2);
+});
+
+t("coalesce: maxBatch 只留最近 N 条", function () {
+  const c = createCoalescer({ windowMs: 100, maxBatch: 2 });
+  c.push({ gid: "A", uid: "u1", text: "一", now: 0 });
+  c.push({ gid: "A", uid: "u1", text: "二", now: 10 });
+  c.push({ gid: "A", uid: "u1", text: "三", now: 20 });
+  const b = c.flushDue(200)[0];
+  eq(b.count, 2);
+  ok(b.text.includes("二") && b.text.includes("三") && !b.text.includes("一"));
+});
+
+t("coalesce: pickAnchor 取最近一条过得去的", function () {
+  const a = pickAnchor([{ action: "ignore" }, { action: "brain", tier: "mid" }, { action: "ignore" }]);
+  eq(a.index, 1);
+  eq(pickAnchor([{ action: "ignore" }]), null);
+});
+
+t("budget: 未超软线时允许主动", function () {
+  const b = createBudget({ limits: { dailyTokens: 1000 }, now: function () { return 0; } });
+  eq(b.mode(), "normal");
+  eq(b.allowProactive(), true);
+  b.record(900, 0);
+  eq(b.mode(), "noProactive");
+  eq(b.allowProactive(), false);
+  eq(b.allowReply(false), true, "关主动 ≠ 不回复");
+  b.record(200, 0);
+  eq(b.mode(), "mentionOnly");
+  eq(b.allowReply(false), false);
+  eq(b.allowReply(true), true, "被点名的仍要回");
+});
+
+t("budget: N23 —— 每群每小时条数上限默认取消", function () {
+  const b = createBudget({ limits: {}, now: function () { return 0; } });
+  eq(b.limits.groupHourlyLimit, 0);
+  for (let i = 0; i < 50; i++) ok(b.groupAllow("A", 0), "默认不应有每小时上限");
+});
+
+t("budget: 跨日归零", function () {
+  let t = new Date(2026, 0, 1, 23, 0, 0).getTime();
+  const b = createBudget({ limits: { dailyTokens: 100 }, now: function () { return t; } });
+  b.record(100, t);
+  eq(b.mode(), "mentionOnly");
+  t = new Date(2026, 0, 2, 0, 30, 0).getTime();
+  eq(b.mode(), "normal");
+});
+
+t("brakes: STOP 文件触发全局停", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "stop-" + Date.now());
+  fs.mkdirSync(dir, { recursive: true });
+  const br = createBrakes({ workspaceRoot: dir, now: function () { return 0; } });
+  eq(br.state("A", 0).stopped, false);
+  fs.writeFileSync(path.join(dir, "STOP"), "x");
+  const s = br.state("A", 0);
+  eq(s.stopped, true);
+  eq(s.reason, "STOP 文件");
+});
+
+t("brakes: 群内指令停到点自动恢复", function () {
+  let t = 1000;
+  const br = createBrakes({ workspaceRoot: path.join(os.tmpdir(), "dshqq-none-" + Date.now()), now: function () { return t; } });
+  br.stopGroup("A", 1, t);
+  eq(br.state("A", t).stopped, true);
+  eq(br.state("B", t).stopped, false, "只停那一个群");
+  t = 1000 + 61000;
+  eq(br.state("A", t).stopped, false, "到期自动恢复");
+});
+
+t("brakes: /停 只认整条指令", function () {
+  eq(parseAdminCommand("/停").cmd, "stop");
+  eq(parseAdminCommand("/停").minutes, 60);
+  eq(parseAdminCommand("/停 5").minutes, 5);
+  eq(parseAdminCommand("/开").cmd, "resume");
+  eq(parseAdminCommand("/状态").cmd, "status");
+  eq(parseAdminCommand("我们/停一下吧"), null);
+  eq(parseAdminCommand("在吗"), null);
+});
+
+t("brakes: isAdmin 认群主/管理/白名单", function () {
+  eq(isAdmin({ uid: "1", role: "owner" }, {}), true);
+  eq(isAdmin({ uid: "1", role: "admin" }, {}), true);
+  eq(isAdmin({ uid: "1", role: "member" }, {}), false);
+  eq(isAdmin({ uid: "9", role: "member" }, { whitelist: ["9"] }), true);
+  eq(isAdmin({ uid: "9", role: "member" }, { owners: ["7"] }), false);
+});
+
+t("onebot: 归一化群消息，识别 @我 与 @全体", function () {
+  const raw = {
+    post_type: "message", message_type: "group", group_id: 255452871, user_id: 1001, self_id: 999,
+    message_id: 7, sender: { nickname: "甲", role: "member" },
+    message: [{ type: "at", data: { qq: "999" } }, { type: "text", data: { text: " 在吗" } }, { type: "at", data: { qq: "all" } }]
+  };
+  const e = normalizeEvent(raw, { selfId: "999", sentIds: new Set(), now: 5 });
+  eq(e.gid, "255452871");
+  eq(e.uid, "1001");
+  eq(e.text, "在吗");
+  eq(e.atBot, true);
+  eq(e.atAll, true);
+  eq(e.speaker, "甲");
+  eq(e.now, 5);
+});
+
+t("onebot: 忽略私聊、自己的消息与空消息", function () {
+  eq(normalizeEvent({ post_type: "message", message_type: "private", user_id: "1", message: [{ type: "text", data: { text: "hi" } }] }, {}), null);
+  eq(normalizeEvent({ post_type: "message", message_type: "group", group_id: 1, user_id: 999, self_id: 999, message: [{ type: "text", data: { text: "hi" } }] }, { selfId: "999" }), null);
+  eq(normalizeEvent({ post_type: "message", message_type: "group", group_id: 1, user_id: 2, message: [] }, { selfId: "9" }), null);
+  eq(normalizeEvent({ post_type: "meta_event", meta_event_type: "heartbeat" }, {}), null);
+});
+
+t("onebot: 回复我 靠 sentIds 判定", function () {
+  const raw = { post_type: "message", message_type: "group", group_id: 1, user_id: 2, self_id: 9, sender: { nickname: "乙" },
+    message: [{ type: "reply", data: { id: "555" } }, { type: "text", data: { text: "对的" } }] };
+  eq(normalizeEvent(raw, { selfId: "9", sentIds: new Set(["555"]) }).replyToBot, true);
+  eq(normalizeEvent(raw, { selfId: "9", sentIds: new Set() }).replyToOther, true);
+});
+
+t("onebot: withToken 追加 access_token", function () {
+  eq(withToken("ws://127.0.0.1:3001", "abc"), "ws://127.0.0.1:3001?access_token=abc");
+  eq(withToken("ws://127.0.0.1:3001?x=1", "abc"), "ws://127.0.0.1:3001?x=1&access_token=abc");
+  eq(withToken("ws://127.0.0.1:3001?access_token=z", "abc"), "ws://127.0.0.1:3001?access_token=z");
+});
+
+t("onebot: 假 transport 端到端收发 + 去重", function () {
+  const sent = []; const got = [];
+  const sock = { send: function (s) { sent.push(JSON.parse(s)); }, close: function () {} };
+  const ob = createOneBot({
+    url: "ws://x", transport: function () { return sock; }, onEvent: function (e) { got.push(e); }, now: function () { return 0; }
+  });
+  ob.connect();
+  sock.onopen();
+  eq(ob.state(), "open");
+  const payload = JSON.stringify({ post_type: "message", message_type: "group", group_id: 1, user_id: 2, self_id: 9, message_id: 11, sender: { nickname: "甲" }, message: [{ type: "text", data: { text: "在吗" } }] });
+  sock.onmessage({ data: payload });
+  sock.onmessage({ data: payload });
+  eq(got.length, 1, "同一条 message_id 只处理一次");
+  ob.sendGroupMsg("1", "在的");
+  eq(sent[0].action, "send_group_msg");
+  eq(sent[0].params.group_id, 1);
+  eq(sent[0].params.message, "在的");
+});
+
+t("config: 字段表默认值可展开，secret 回前端被遮蔽", function () {
+  const table = loadFieldTable();
+  const cfg = defaultsFromTable(table);
+  eq(getPath(cfg, "napcat.wsUrl"), "ws://127.0.0.1:3001");
+  eq(getPath(cfg, "gates.utilitySpeakAt"), 0.2);
+  eq(getPath(cfg, "gates.utilityDetailedAt"), 0.65, "N19：以前端实取的三档线为准");
+  const red = redactConfig(setPath(JSON.parse(JSON.stringify(cfg)), "napcat.token", "sekrit"), table);
+  eq(getPath(red, "napcat.token"), "<已配置>");
+  ok(JSON.stringify(red).indexOf("sekrit") < 0, "明文不能出现在回给前端的配置里");
+});
+
+t("config: runtimeConfig 落实 N6/N8/N23 决策", function () {
+  const table = loadFieldTable();
+  const cfg = deepMerge(defaultsFromTable(table), {});
+  const rc = runtimeConfig(cfg);
+  eq(rc.contextWindow, 10, "N8：进 prompt 的历史 10 条");
+  eq(rc.observe, true, "N9：默认观察模式");
+  eq(rc.maxSegments, 3, "N6：最多分 3 条");
+  eq(rc.budget.groupHourlyLimit, 0, "N23：取消每群每小时上限");
+  eq(rc.budget.dailyTokens, 5000000);
+  eq(rc.depthChars[2], 200);
+});
+
+function fakeBot(overrides) {
+  return {
+    handleEvent: async function (evt) {
+      return Object.assign({ gid: evt.gid, uid: evt.uid, action: "brain", verdict: "yes", pSay: 0.9, U: 0.5, tier: "mid", maxChars: 60, search: 1, keywords: ["x"], bucket: "question", arm: "terse", reason: ["测试"], injected: false }, overrides || {});
+    }
+  };
+}
+function fakeStore() { const rows = []; return { rows: rows, addObservation: function (r) { rows.push(r); } }; }
+
+t("runtime: 观察模式不回、但把判定落 observation", async function () {
+  const store = fakeStore(); const sent = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: true, coalesceWindowMs: 100, coalesceMaxBatch: 5, contextWindow: 10 },
+    store: store, bot: fakeBot(), send: function (g, t) { sent.push(t); }, now: function () { return 0; }
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "在吗", now: 0 });
+  const r = await rt.tick(1000);
+  eq(sent.length, 0, "观察模式一个字都不发");
+  eq(r.results[0].action, "observe_only");
+  ok(store.rows.some(function (x) { return x.kind === "decision"; }), "判定要落盘");
+  ok(store.rows.some(function (x) { return x.kind === "observe_only"; }));
+});
+
+t("runtime: 合并同人连发后只回一次，并按句号分条", async function () {
+  const store = fakeStore(); const sent = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 100, coalesceMaxBatch: 5, maxSegments: 3 },
+    store: store, bot: fakeBot({ maxChars: 10 }),
+    send: function (g, t) { sent.push(t); },
+    askBrain: async function () { return { ok: true, text: "第一句是这样的。第二句再补一点。" , usage: { inputTokens: 10, outputTokens: 10, cacheReadTokens: 90, cacheWriteTokens: 0 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "在吗", now: 0 });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "帮我看看这个", now: 50 });
+  const r = await rt.tick(500);
+  eq(sent.length, 2, "分两条发送，实得 " + JSON.stringify(sent));
+  eq(rt.stats().replies, 1, "合并后只算一次回复");
+  eq(r.results[0].merged, 2);
+  ok(store.rows.some(function (x) { return x.kind === "sent"; }));
+});
+
+t("runtime: 管理员 /停 之后进入暂停，后续消息不再处理", async function () {
+  const sent = [];
+  const rt = createRuntime({
+    config: { admin: { admins: ["1001"] } }, runtime: { observe: false, coalesceWindowMs: 100 },
+    store: fakeStore(), bot: fakeBot(), send: function (g, t) { sent.push(t); }, now: function () { return 0; }
+  });
+  const a = await rt.onEvent({ gid: "A", uid: "1001", role: "admin", speaker: "管理", text: "/停 5", now: 0 });
+  eq(a.action, "admin_stop");
+  eq(sent.length, 1, "应回一句确认");
+  const b = await rt.onEvent({ gid: "A", uid: "u9", speaker: "路人", text: "在吗", now: 10 });
+  eq(b.action, "stopped");
+  const c = await rt.onEvent({ gid: "B", uid: "u9", speaker: "路人", text: "在吗", now: 10 });
+  eq(c.action, "pending", "只停了那一个群");
+});
+
+t("runtime: 预算硬线只回被点名的", async function () {
+  const sent = [];
+  const budget = createBudget({ limits: { dailyTokens: 10 }, now: function () { return 0; } });
+  budget.record(10, 0);
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 100 },
+    store: fakeStore(), bot: fakeBot(), budget: budget, send: function (g, t) { sent.push(t); }, now: function () { return 0; },
+    askBrain: async function () { return { ok: true, text: "嗯", usage: { totalTokens: 1 } }; }, sleep: async function () {}
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "随便说说", now: 0 });
+  const r1 = await rt.tick(500);
+  eq(r1.results[0].action, "budget_block");
+  await rt.onEvent({ gid: "A", uid: "u2", speaker: "乙", text: "@我 在吗", atBot: true, now: 600 });
+  const r2 = await rt.tick(1200);
+  eq(r2.results[0].action, "sent");
+});
+
+await Promise.all(pendingTests);
 console.log("=== 骨架回归测试 ===");
 console.log("通过 " + pass + " 项，失败 " + fails.length + " 项");
 for (const f of fails) console.log("  FAIL " + f);
