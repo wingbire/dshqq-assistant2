@@ -1,0 +1,35 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T13:46:38.479Z
+# 原始路径名: Read package.json
+# 提取方式: 文件块(31行)
+# ---------- 以下为逐字内容 ----------
+{
+  "name": "dsh-qq-assistant",
+  "version": "0.3.0",
+  "private": true,
+  "description": "DSH-QQ 群小助手 · 后台配置程序",
+  "type": "module",
+  "main": "src/main.js",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/main.js",
+    "test": "node --test \"test/*.test.mjs\"",
+    "test:perfile": "powershell -NoProfile -ExecutionPolicy Bypass -File build/test-perfile.ps1",
+    "check": "node build/check.mjs",
+    "check:wiring": "node build/wiring-check.mjs",
+    "eval:classify": "node build/classify-eval.mjs",
+    "verify": "node build/check.mjs && node build/wiring-check.mjs && node --test \"test/*.test.mjs\" && node build/audit-final.cjs",
+    "audit": "node build/audit-final.cjs",
+    "calib": "node build/calib.cjs",
+    "replay": "node build/replay.cjs",
+    "sim": "node build/sim-full.cjs",
+    "train-addressee": "node build/train-addressee.cjs",
+    "regress": "node build/regress.mjs",
+    "verify:train-human": "node build/verify-train-human.mjs",
+    "pack": "powershell -NoProfile -ExecutionPolicy Bypass -File build/package.ps1"
+  }
+}
+

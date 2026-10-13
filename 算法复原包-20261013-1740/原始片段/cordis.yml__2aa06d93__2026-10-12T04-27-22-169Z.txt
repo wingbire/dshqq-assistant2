@@ -1,0 +1,10 @@
+# 来源会话: dsh-session-2aa06d93-433f-4092-af80-b44e2ca5fdb9
+# 记录时间: 2026-10-12T04:27:22.169Z
+# 原始路径名: cordis.yml
+# 提取方式: 文件块(5行)
+# ---------- 以下为逐字内容 ----------
+# dsh profile root — an empty entry list. The tree is composed as patches:
+# each bundle in package.json's dsh.profile.bundles, then cordis.patch.yml, then any
+# --patch overlays. Edit cordis.patch.yml, not this file.
+[]
+"}]

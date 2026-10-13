@@ -1,0 +1,9 @@
+# 来源会话: dsh-session-f6d725a3-f6dd-407e-bba8-b189127a0c85
+# 记录时间: 2026-10-12T06:25:48.307Z
+# 原始路径名: headless/cordis.patch.yml
+# 提取方式: 文件块(5行)
+# ---------- 以下为逐字内容 ----------
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+[]

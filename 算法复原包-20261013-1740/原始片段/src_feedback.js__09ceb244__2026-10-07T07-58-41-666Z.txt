@@ -1,0 +1,352 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:58:41.666Z
+# 原始路径名: src/feedback.js
+# 提取方式: 文件块(347行,已去行号)
+# ---------- 以下为逐字内容 ----------
+import fs from "node:fs";
+import path from "node:path";
+import { DATA_ROOT, ensureDir } from "./paths.js";
+import { rewardStats, pickExamples, explorationFactor, defaultScoreConfig } from "./score.js";
+
+// 互动反馈：记录「小助手回完一句之后，群里有没有接着往下聊」。
+// 目标不是评价谁对谁错，而是给"参与度/人设"一个可量化的奖惩信号，
+// 供群档案更新时参考（详见 docs：本文件末尾的评分规则注释）。
+
+const FILE = path.join(DATA_ROOT, "data", "interaction-feedback.json");
+const MAX_EVENTS = 500;                 // 只用于限制文件体积，最近 20 条结算才是评分的依据
+const CLOSED_KEEP = 400;                // 有 未结算 事件时，优先保留它们，把最老的已结算事件挤掉
+
+// ---- 评分规则（写死在这里，方便对照）----
+//  跟话题 / 接着问 / 叫你外号   +2   （对方愿意继续深入）
+//  他不再说话、别人接着聊别的   -1   （你可能是把天聊死了）
+//  明确嫌你烦 / 说你答错了      -2
+//  他沉默了，但群里也没人说话   0    （可能只是散场，不算你的锅）
+export const SCORE_WEIGHTS = { followUp: 2, nameCall: 2, nextQuestion: 2, silence: -1, annoyance: -2, neutral: 0 };
+
+function load(query) {
+const file = typeof query === "function" ? query("FILE") : FILE;
+try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch (e) { return { groups: {} }; }
+}
+
+export function createFeedback(opts) {
+const o = opts || {};
+const file = o.file || FILE;
+const now = o.now || (() => Date.now());
+// 收件人（addressee）模块：由外部注入，用来判断"这句话是不是在跟小助手说"。
+// 没注入时退化成旧的显式规则（回复/@/外号），保证功能不会因为缺少依赖而失效。
+const addressee = typeof o.addressee === "function" ? o.addressee() : (o.addressee || null);
+// 代价权重 λ 从配置读（gates.tokenCostPenalty），没配就用默认
+const scoreCfg = typeof o.scoreConfig === "function" ? o.scoreConfig : function () { return defaultScoreConfig(); };
+function cfgNow() {
+try {
+const c = scoreCfg();
+if (c && typeof c === "object") return c;
+} catch (e) {}
+return defaultScoreConfig();
+}
+let data = loadFile(file);
+let dirty = false;
+let timer = null;
+
+function loadFile(f) {
+try { const j = JSON.parse(fs.readFileSync(f, "utf8")); return j && j.groups ? j : { groups: {} }; }
+catch (e) { return { groups: {} }; }
+}
+function save() {
+if (!dirty) return;
+try {
+ensureDir(path.dirname(file));
+const tmp = file + ".tmp";
+fs.writeFileSync(tmp, JSON.stringify(data, null, 2), "utf8");
+fs.renameSync(tmp, file);
+dirty = false;
+} catch (e) {}
+}
+
+function bucket(gid, create) {
+const k = String(gid);
+let b = data.groups[k];
+if (!b && create) { b = { events: [], updatedAt: 0 }; data.groups[k] = b; }
+return b || null;
+}
+
+// 先给所有过窗的未结算事件定分（散场=0 / 群里还在聊=-1），保证裁剪时不会有"半条"丢分
+function settleExpired(b) {
+let n = 0;
+for (const e of b.events) {
+if (e.closed) continue;
+if (now() - e.at <= e.windowMs) continue;
+e.delta = SCORE_WEIGHTS.neutral;
+e.label = "群里散场了";
+if (e.touched) { e.delta = SCORE_WEIGHTS.silence; e.label = "没人接我的话"; }
+e.closed = true; e.closedAt = now();
+n++;
+}
+if (n) { b.updatedAt = now(); dirty = true; }
+return n;
+}
+
+// 裁剪：先把过窗的结算掉，再删最老的"已结算"事件；未结算的一律保留
+function trimEvents(b) {
+settleExpired(b);
+while (b.events.length > MAX_EVENTS) {
+let idx = -1;
+for (let i = 0; i < b.events.length; i++) if (b.events[i].closed) { idx = i; break; }
+if (idx < 0) break;                       // 全是未结算的，宁可超一点也不能丢
+b.events.splice(idx, 1);
+}
+if (b.events.length > CLOSED_KEEP) {
+const unclosed = b.events.filter(function (e) { return !e.closed; });
+const closed = b.events.filter(function (e) { return e.closed; });
+if (closed.length > CLOSED_KEEP) {
+b.events = closed.slice(closed.length - CLOSED_KEEP).concat(unclosed);
+}
+}
+}
+
+function noteBotReply(gid, info) {
+const b = bucket(gid, true);
+b.events.push({
+at: now(),
+replyTo: String((info && info.userId) || ""),
+replyText: String((info && info.text) || "").slice(0, 120),
+promptText: String((info && info.prompt) || "").slice(0, 200),   // 触发这句回复的用户消息（用于导出成对的微调样本）
+interjections: [],                        // 我发完之后、目标开口之前，别人插进来的话
+lastSpeakerBefore: String((info && info.lastSpeakerBefore) || ""),  // 我发之前最后说话的人
+lastSpeakerGap: Number((info && info.lastSpeakerGap) || 0),         // 距我发话前最后一条消息的毫秒数
+myUnansweredQuestion: !!(info && info.myUnansweredQuestion),        // 我上一条是不是还没被回答的提问
+reason: String((info && info.reason) || "").slice(0, 40),
+windowMs: Number((info && info.windowMs) || 180000),
+tokensIn: Number((info && info.tokensIn) || 0),     // 未命中输入（计费口径）
+tokensOut: Number((info && info.tokensOut) || 0),   // 输出
+toolCalls: Number((info && info.toolCalls) || 0),
+closed: false,
+touched: false,
+delta: null,
+label: ""
+});
+trimEvents(b);
+b.updatedAt = now();
+dirty = true;
+save();
+return b.events[b.events.length - 1];
+}
+
+// 有新消息时调用：给还没结算的互动定分。
+//
+// 打分规则（重点在"别把别人的话算成接我"）：
+//   1. 有人明显嫌烦/纠错            → -2（负分优先，盖过其它信号）
+//   2. 明确在对我说话（回复我 / 叫我外号）→ +2（+2 当"还叫了我"）
+//   3. 是我那句的收件人接着说话，但这期间已经有人插过嘴
+//      → 无法确定他在对谁说 → 记 0，不奖不罚（原来记 +2，属于把别人的对话算成我的功劳）
+//   4. 我发完之后、收件人还没开口，是别人先说话 → 只标记 touched；
+//      等收件人窗口结束仍没接 → -1
+function observeMessage(gid, msg) {
+const b = bucket(gid, false);
+if (!b || !b.events.length) return null;
+const m = msg || {};
+const me = String(m.selfId || "");
+const uid = String(m.userId || "");
+if (m.self) return null;                       // 自己发的，不算反馈
+if (me && uid === me) return null;
+// 顺手把这条消息喂给收件人模块（在线累积群内语料/行为统计），零成本
+if (addressee && addressee.observe) {
+try { addressee.observe(gid, { text: m.text, userId: uid, afterBot: !!m.afterBot }); } catch (err) {}
+}
+// ① 找出还在窗口内的未结算互动
+let target = null;
+for (let i = b.events.length - 1; i >= 0; i--) {
+const e = b.events[i];
+if (e.closed) continue;
+if (now() - e.at > e.windowMs) continue;
+target = e;
+break;
+}
+// 别人插话：记进 target 的 interjections（给语义层做对比用），并打 touched 标记
+if (target && uid !== target.replyTo) {
+target.interjections = Array.isArray(target.interjections) ? target.interjections : [];
+if (target.interjections.length < 6) target.interjections.push({ userId: uid, text: String(m.text || "").slice(0, 120), at: now() });
+target.touched = true;
+target.touchedAt = now();
+dirty = true;
+return null;
+}
+if (!target) return null;
+let changed = null;
+if (m.negative) {
+target.delta = SCORE_WEIGHTS.annoyance;
+target.label = "有人嫌烦/纠错";
+} else if (uid && target.replyTo && uid === target.replyTo) {
+// 目标本人开口了：交给收件人判定（硬信号→结构→语义→行为统计）算置信度
+changed = scoreTarget(gid, target, m);
+if (!changed) return null;
+} else {
+return null;                                    // 跟我这条无关，等下一条或 tick
+}
+target.closed = true;
+target.closedAt = now();
+changed = target;
+if (changed) { b.updatedAt = now(); dirty = true; }
+return changed;
+}
+
+// 给"目标本人开口"这件事定分：置信度 → 分数
+function scoreTarget(gid, e, m) {
+// 没有注入 addressee 模块 → 退回旧的显式规则
+if (!addressee || !addressee.judge) {
+if (m.mentionsBot) { e.delta = SCORE_WEIGHTS.followUp + SCORE_WEIGHTS.nameCall; e.label = "对方接着说·还叫了我"; }
+else if (e.touched) { e.delta = SCORE_WEIGHTS.neutral; e.label = "他接着说话，但中途有人插话"; }
+else { e.delta = SCORE_WEIGHTS.followUp; e.label = "对方接着说"; }
+return e;
+}
+let jr = null;
+try {
+jr = addressee.judge(gid, {
+text: String(m.text || ""),
+userId: String(m.userId || ""),
+mentionsBot: !!m.mentionsBot,
+replyToBot: !!m.replyToBot,
+lastBotText: e.replyText,
+lastBotAt: e.at,
+interjections: e.interjections || [],
+myUnansweredQuestion: !!e.myUnansweredQuestion,
+recentSpeakers: Number(m.recentSpeakers || 0)
+});
+} catch (err) { jr = null; }
+e.addressee = jr || null;
+if (jr && jr.kind === "hard") {
+e.delta = SCORE_WEIGHTS.followUp + SCORE_WEIGHTS.nameCall;
+e.label = "明确对我说" + (jr.signals && jr.signals.length ? "（" + jr.signals.map(function (x) { return x.k; }).join("+") + "）" : "");
+return e;
+}
+const d = (addressee.deltaForJudge && jr) ? addressee.deltaForJudge(jr) : { delta: null, label: "" };
+if (d.delta !== null) {
+e.delta = d.delta;
+e.label = d.label + (jr ? "（" + jr.conf + "）" : "");
+return e;
+}
+// 置信度太低 → 看"我发话前最后说话的是不是人"
+const gap = Number(e.lastSpeakerGap || 0);
+if (e.lastSpeakerBefore && gap > 0 && gap <= 120000) {
+e.delta = SCORE_WEIGHTS.silence;
+e.label = "他接的是别人的话（我插在中间）";
+} else {
+e.delta = SCORE_WEIGHTS.neutral;
+e.label = "他没接我这条";
+}
+return e;
+}
+
+// 超时的互动：窗口结束还没人接话。
+//   他一句话都没接、但群里还在聊 → -1（大概率是我把天聊死了）
+//   他接了别的话 / 群里散场了        → 0（不算我的锅）
+function tick(activeGroups) {
+const active = activeGroups || {};
+let n = 0;
+for (const gid of Object.keys(data.groups)) {
+const b = data.groups[gid];
+const before = n;
+for (const e of b.events) {
+if (e.closed) continue;
+if (now() - e.at <= e.windowMs) continue;
+if (e.touched || active[gid]) { e.delta = SCORE_WEIGHTS.silence; e.label = e.touched ? "别人插话，对方没接" : "没人接我的话"; }
+else { e.delta = SCORE_WEIGHTS.neutral; e.label = "群里散场了"; }
+e.closed = true; e.closedAt = now();
+n++;
+}
+if (n > before) { b.updatedAt = now(); dirty = true; }
+trimEvents(b);
+}
+save();
+return n;
+}
+
+function stats(gid, limit) {
+const b = bucket(gid, false);
+const events = b ? b.events.filter((e) => e.closed && e.delta !== null).slice(-(limit || 20)) : [];
+const n = events.length;
+if (!n) return { n: 0, score: 0, avg: 0, positive: 0, negative: 0, recent: [] };
+let sum = 0, pos = 0, neg = 0;
+for (const e of events) {
+sum += e.delta;
+if (e.delta > 0) pos++;
+if (e.delta < 0) neg++;
+}
+const avg = sum / n;
+// 代价感知：reward = 互动分 - λ×归一化代价，再做折扣平均 + UCB
+const cost = rewardStats(events, cfgNow(), 3000);
+return {
+n: n,
+score: sum,
+avg: Math.round(avg * 100) / 100,
+positive: pos,
+negative: neg,
+cost: cost,
+recent: events.slice(-6).map((e) => ({ delta: e.delta, label: e.label, replyText: e.replyText.slice(0, 40), tokensIn: e.tokensIn || 0, tokensOut: e.tokensOut || 0 }))
+};
+}
+
+// 用「代价感知 + 折扣 + UCB」的分数决定探索力度：
+// reward 高 → 敢动（放宽安全带）；reward 低（包括"又贵又没人理"）→ 收紧
+function multiplier(gid) {
+const b = bucket(gid, false);
+const events = b ? b.events.filter(function (e) { return e.closed && e.delta !== null; }).slice(-20) : [];
+const cost = rewardStats(events, cfgNow(), 3000);
+const ex = explorationFactor(cost.scoreUcb, cost.n);
+return {
+factor: ex.factor,
+confidence: cost.n >= 5 ? "ok" : "low",
+level: ex.level,
+avg: cost.avgEngagement,
+ucb: cost.scoreUcb,
+ema: cost.scoreEma,
+n: cost.n,
+avgCostTokens: cost.avgCostTokens,
+efficiency: cost.efficiency
+};
+}
+
+// 挑"效果最好又不太贵"的发言当范例，供复盘时注入提示词
+function examples(gid, limit) {
+const b = bucket(gid, false);
+if (!b) return [];
+return pickExamples(b.events, limit);
+}
+
+// 成对的（用户说了什么 → 我怎么回 → 群里什么反应）样本，用于导出微调数据
+function pairs(gid, limit) {
+const b = bucket(gid, false);
+if (!b) return [];
+const out = [];
+for (const e of b.events) {
+if (!e.closed || e.delta === null) continue;
+if (e.delta <= 0) continue;                 // 只要"被接住"的正面样本
+if (!e.promptText || !e.replyText) continue;
+out.push({ user: e.promptText, assistant: e.replyText, score: e.delta, tokens: (e.tokensIn || 0) + (e.tokensOut || 0) });
+if (out.length >= (limit || 6)) break;
+}
+return out;
+}
+
+function startTicker(activeGroupsFn, intervalMs) {
+if (timer) return;
+timer = setInterval(function () {
+try { tick(activeGroupsFn ? activeGroupsFn() : {}); } catch (e) {}
+}, Number(intervalMs) || 120000);
+if (timer.unref) timer.unref();
+}
+function stopTicker() { if (timer) { clearInterval(timer); timer = null; } }
+
+return {
+noteBotReply: noteBotReply,
+observeMessage: observeMessage,
+tick: tick,
+stats: stats,
+multiplier: multiplier,
+examples: examples,
+pairs: pairs,
+startTicker: startTicker,
+stopTicker: stopTicker,
+save: save
+};
+}"}]

@@ -1,0 +1,435 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:56:39.948Z
+# 原始路径名: src/server.js
+# 提取方式: 文件块(431行,已去行号)
+# ---------- 以下为逐字内容 ----------
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { APP_ROOT, FEED_DIR } from "./paths.js";
+import { detectDsh } from "./dsh.js";
+import { DEFAULT_PERSONA } from "./config.js";
+import { PARAM_BOUNDS, bandFor, clampParams } from "./profile.js";
+
+const MIME = {
+".html": "text/html; charset=utf-8",
+".js": "text/javascript; charset=utf-8",
+".css": "text/css; charset=utf-8",
+".json": "application/json; charset=utf-8",
+".svg": "image/svg+xml",
+".png": "image/png",
+".jpg": "image/jpeg",
+".jpeg": "image/jpeg",
+".gif": "image/gif",
+".webp": "image/webp",
+".ico": "image/x-icon"
+};
+
+function sendJson(res, code, obj) {
+const body = JSON.stringify(obj);
+res.writeHead(code, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
+res.end(body);
+}
+
+function readBody(req) {
+return new Promise(function (resolve, reject) {
+let data = "";
+req.on("data", function (c) { data += c; if (data.length > 2e6) { req.destroy(); reject(new Error("body too large")); } });
+req.on("end", function () { resolve(data); });
+req.on("error", reject);
+});
+}
+
+function serveFeedQr(ctx, res, url) {
+const feed = (ctx.config && ctx.config.feed) || {};
+let src = String(feed.imagePath || "").trim();
+// 自动抓取的二维码存在 feed 目录里，用 ?f=文件名 指定；只允许纯文件名，防目录穿越
+const f = url && url.searchParams ? url.searchParams.get("f") : null;
+if (f) {
+const safe = path.basename(String(f));
+if (safe && /\.(png|jpe?g|gif|webp)$/i.test(safe)) {
+const cand = path.join(FEED_DIR, safe);
+try { if (fs.existsSync(cand) && fs.statSync(cand).isFile()) src = cand; } catch (e) {}
+}
+}
+if (!feed.enabled || !src || src.indexOf("http") === 0) {
+res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+return res.end("no feed image");
+}
+try {
+if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+res.writeHead(404); return res.end("file missing");
+}
+const ext = path.extname(src).toLowerCase();
+res.writeHead(200, { "content-type": MIME[ext] || "image/png" });
+return fs.createReadStream(src).pipe(res);
+} catch (e) {
+res.writeHead(500); return res.end("error");
+}
+}
+
+export function createServer(ctx) {
+const publicDir = path.join(APP_ROOT, "public");
+return http.createServer(async function (req, res) {
+const url = new URL(req.url, "http://" + (req.headers.host || "127.0.0.1"));
+try {
+if (url.pathname === "/feed-qr") return serveFeedQr(ctx, res, url);
+if (url.pathname.indexOf("/api/") === 0) return await handleApi(ctx, req, res, url);
+if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); return res.end(); }
+const rel = url.pathname === "/" ? "index.html" : url.pathname.replace(/^[\/]+/, "");
+const file = path.resolve(publicDir, rel);
+if (file.indexOf(publicDir) !== 0 || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+return res.end("404");
+}
+res.writeHead(200, { "content-type": MIME[path.extname(file).toLowerCase()] || "application/octet-stream" });
+return fs.createReadStream(file).pipe(res);
+} catch (err) {
+sendJson(res, 500, { ok: false, error: String((err && err.message) || err) });
+}
+});
+}
+
+async function handleApi(ctx, req, res, url) {
+const p = url.pathname;
+if (p === "/api/status" && req.method === "GET") {
+return sendJson(res, 200, {
+ok: true,
+name: "DSH-QQ 群小助手",
+version: ctx.version,
+uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
+dataRoot: ctx.dataRoot,
+dsh: ctx.getDshStatus(),
+onebot: ctx.getOnebotStatus(),
+stats: ctx.getStats(),
+brain: { tier: ctx.config.brain.tier },
+balance: ctx.getBalance ? ctx.getBalance() : null
+});
+}
+if (p === "/api/events" && req.method === "GET") {
+return sendJson(res, 200, { ok: true, events: ctx.getEvents() });
+}
+if (p === "/api/events" && req.method === "DELETE") {
+ctx.clearEvents();
+return sendJson(res, 200, { ok: true });
+}
+if (p === "/api/groups" && req.method === "GET") {
+let live = [];
+let liveError = null;
+try { live = (await ctx.callOnebot("get_group_list", {})) || []; }
+catch (e) { liveError = String((e && e.message) || e); }
+// 用实时群列表标记"已退出的群"（只有拿到非空列表才敢标记，NapCat 掉线时不动）
+let liveness = { marked: 0, revived: 0 };
+if (live.length && ctx.setGroupsLive) {
+try { liveness = ctx.setGroupsLive(live.map(function (g) { return String(g.group_id); })); } catch (e) {}
+}
+const map = {};
+for (const g of ctx.knownGroups()) map[String(g.groupId)] = { groupId: String(g.groupId), name: g.name, messages: g.messages, lastSeen: g.lastSeen, live: false };
+for (const g of live) {
+const id = String(g.group_id);
+const name = g.group_name || null;
+if (name) ctx.setGroupName(id, name);
+map[id] = Object.assign({ groupId: id, name: name || (map[id] && map[id].name) || null, messages: (map[id] && map[id].messages) || 0, lastSeen: (map[id] && map[id].lastSeen) || 0 }, { live: true });
+}
+const rules = ctx.getRules();
+const leftIds = [];
+const groups = Object.keys(map).map(function (k) {
+const g = map[k];
+const ov = (rules.groups && rules.groups[k]) || {};
+const eff = ctx.rulesFor(k);
+g.rulesEnabled = eff.enabled !== false;
+g.aiEnabled = eff.aiEnabled !== false;
+g.groupOverride = Object.prototype.hasOwnProperty.call(ov, "enabled") ? !!ov.enabled : null;
+if (g.left) leftIds.push(k);
+return g;
+})
+// 只在本地记录过、但已经不在实时群列表里的群，不再出现在下拉框里（想彻底删看 /api/groups/remove）
+.filter(function (g) { return !g.left; })
+.sort(function (a, b) { return (b.lastSeen || 0) - (a.lastSeen || 0); });
+return sendJson(res, 200, { ok: true, groups: groups, leftIds: leftIds, liveness: liveness, liveError: liveError });
+}
+if (p === "/api/groups/remove" && req.method === "POST") {
+const body = await readBody(req);
+const parsed = JSON.parse(body || "{}");
+const gid = String(parsed.groupId || "");
+if (!gid) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+const done = ctx.removeGroup ? ctx.removeGroup(gid) : false;
+return sendJson(res, 200, { ok: done });
+}
+// ---- 本群专属人设（面板「人设」页的群人设区用）----
+// 存在群档案文件的 personaText 里，每次「提炼群档案」由自学习自动更新
+if (p === "/api/group/persona" && req.method === "GET") {
+const gid = String((url.searchParams && url.searchParams.get("groupId")) || "");
+if (!gid) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+let prof = null;
+try { prof = ctx.store.loadGroupProfile(gid); } catch (e) { prof = null; }
+const personaText = (prof && prof.personaText) ? String(prof.personaText) : "";
+return sendJson(res, 200, {
+ok: true, groupId: gid,
+personaText: personaText,
+exists: !!prof,
+updatedAt: (prof && prof.updatedAt) || 0,
+lines: (prof && Array.isArray(prof.lines)) ? prof.lines.length : 0,
+reason: (prof && prof.paramsReason) || "",
+limit: 4000,
+hint: "这段文字只对这一个群生效，会在新会话时注入提示词（在全局人设之后、群档案之前）。每次提炼群档案，自学习会重写它。"
+});
+}
+if (p === "/api/group/persona" && req.method === "PUT") {
+let body = {};
+try { const b = await readBody(req); body = b ? JSON.parse(b) : {}; } catch (e) { body = {}; }
+const gid = String(body.groupId || "");
+if (!gid) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+if (body.personaText === undefined && body.clear !== true) {
+return sendJson(res, 200, { ok: false, error: "缺少 personaText（或 clear:true 清空）" });
+}
+let prof = null;
+try { prof = ctx.store.loadGroupProfile(gid); } catch (e) { prof = null; }
+if (!prof) return sendJson(res, 200, { ok: false, error: "这个群还没有档案记录" });
+const next = Object.assign({}, prof);
+const text = body.clear === true ? "" : String(body.personaText || "").replace(/\
+\
+/g, "\
+").trim().slice(0, 4000);
+next.personaText = text;
+next.updatedAt = Date.now();
+try { ctx.store.saveGroupProfile(gid, next); } catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+// 这里**故意不重置会话**：重置会丢掉缓存前缀，下一条消息就变成冷启动（成本是热缓存的十倍上下）。
+// 群体人设本来就会在下一次新会话（maxTurns 到期/自学习改完设定/手动重置）时自动注入。
+return sendJson(res, 200, { ok: true, cleared: text.length === 0, length: text.length, reset: false, note: "下一次新会话生效" });
+}
+
+// ---- 本群专属参数（面板「回复判定」页的群参数区用）----
+// GET  拿某群当前「生效值 + 是否被覆盖 + 安全区间」
+// PUT  写覆盖值（过白名单+硬边界+比例带）；reset:true 清除覆盖、回落到全局
+if (p === "/api/group/params" && req.method === "GET") {
+const gid = String((url.searchParams && url.searchParams.get("groupId")) || "");
+if (!gid) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+const globalGates = ctx.config.gates || {};
+let stored = {};
+let prof = null;
+try { prof = ctx.store.loadGroupProfile(gid); } catch (e) { prof = null; }
+stored = (prof && prof.params) || {};
+// 生效值：用 factor=1 算一遍（等价于当前群里真正在用的值）
+let eff = {};
+try { eff = ctx.store.gatesFor(gid, globalGates, 1); } catch (e) { eff = globalGates; }
+const flat = {};
+for (const k of Object.keys(PARAM_BOUNDS)) {
+const src = (eff.autoJoin && k in eff.autoJoin) ? eff.autoJoin : eff;
+const v = src[k];
+flat[k] = v === undefined ? null : v;
+}
+const ranges = {};
+for (const k of Object.keys(PARAM_BOUNDS)) {
+const band = bandFor(k, globalGates);
+ranges[k] = { min: band ? band[0] : PARAM_BOUNDS[k].min, max: band ? band[1] : PARAM_BOUNDS[k].max };
+}
+const globalFlat = {};
+for (const k of Object.keys(PARAM_BOUNDS)) {
+const src = (globalGates.autoJoin && k in globalGates.autoJoin) ? globalGates.autoJoin : globalGates;
+globalFlat[k] = src[k] === undefined ? null : src[k];
+}
+return sendJson(res, 200, {
+ok: true, groupId: gid,
+stored: stored, overridden: Object.keys(stored).length > 0,
+effective: flat, global: globalFlat, ranges: ranges,
+updatedAt: (prof && prof.paramsUpdatedAt) || 0,
+reason: (prof && prof.paramsReason) || ""
+});
+}
+if (p === "/api/group/params" && req.method === "PUT") {
+let body = {};
+try { const b = await readBody(req); body = b ? JSON.parse(b) : {}; } catch (e) { body = {}; }
+const gid = String(body.groupId || "");
+if (!gid) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+if (body.reset !== true && (!body.params || typeof body.params !== "object")) {
+// 防止"没带参数的空请求"误清本群已有覆盖
+return sendJson(res, 200, { ok: false, error: "缺少 params（或在 reset:true 时清除）" });
+}
+let prof = null;
+try { prof = ctx.store.loadGroupProfile(gid); } catch (e) { prof = null; }
+if (!prof) return sendJson(res, 200, { ok: false, error: "这个群还没有档案记录" });
+const next = Object.assign({}, prof);
+if (body.reset === true) {
+delete next.params;
+next.paramsUpdatedAt = Date.now();
+next.paramsReason = "";
+try { ctx.store.saveGroupProfile(gid, next); } catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+// 清掉本群会话缓存，让回落立即生效
+try { ctx.store.clearGatesCache(); } catch (e) {}
+return sendJson(res, 200, { ok: true, reset: true, params: {}, effective: ctx.config.gates });
+}
+// 过一遍白名单 + 硬边界 + 比例带；非数字的键直接丢掉（不静默改成 0）
+const input = body.params && typeof body.params === "object" ? body.params : {};
+const numeric = {};
+const rejected = [];
+for (const k of Object.keys(input)) {
+const v = Number(input[k]);
+if (!Number.isFinite(v)) { rejected.push(k); continue; }
+numeric[k] = v;
+}
+// 落盘值同时夹进"硬边界"和"相对全局值的比例带"——这样界面看到的范围就是真正生效的范围，
+// 不会出现"存了 30 但实际按 54 跑"这种对不上的情况
+const rawClean = clampParams(numeric);
+const clean = {};
+for (const k of Object.keys(rawClean)) {
+const band = bandFor(k, ctx.config.gates || {});
+const lo = band ? band[0] : PARAM_BOUNDS[k].min;
+const hi = band ? band[1] : PARAM_BOUNDS[k].max;
+clean[k] = Math.round(Math.min(hi, Math.max(lo, rawClean[k])) * 1000) / 1000;
+}
+next.params = clean;
+next.paramsUpdatedAt = Date.now();
+if (body.reason !== undefined) next.paramsReason = String(body.reason || "").slice(0, 200);
+try { ctx.store.saveGroupProfile(gid, next); } catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+try { ctx.store.clearGatesCache(); } catch (e) {}
+let eff = {};
+try { eff = ctx.store.gatesFor(gid, ctx.config.gates || {}, 1); } catch (e) {}
+const flat = {};
+for (const k of Object.keys(clean)) {
+const src = (eff.autoJoin && k in eff.autoJoin) ? eff.autoJoin : eff;
+flat[k] = src[k] === undefined ? null : src[k];
+}
+return sendJson(res, 200, { ok: true, params: clean, effective: flat, rejected: rejected });
+}
+
+// ---- 学习成果导出（只写文件，不改配置）----
+if (p === "/api/export/global" && req.method === "POST") {
+if (!ctx.learner) return sendJson(res, 200, { ok: false, error: "导出模块未装配" });
+let opts = {};
+try { const b = await readBody(req); opts = b ? JSON.parse(b) : {}; } catch (e) { opts = {}; }
+return sendJson(res, 200, ctx.learner.exportGlobal(opts));
+}
+if (p === "/api/export/group" && req.method === "POST") {
+if (!ctx.learner) return sendJson(res, 200, { ok: false, error: "导出模块未装配" });
+let opts = {};
+try { const b = await readBody(req); opts = b ? JSON.parse(b) : {}; } catch (e) { opts = {}; }
+if (!opts.groupId) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+return sendJson(res, 200, ctx.learner.exportGroup(String(opts.groupId), opts));
+}
+if (p === "/api/export/dir" && req.method === "GET") {
+const info = ctx.learner ? ctx.learner.exportDirInfo() : { dir: "" };
+return sendJson(res, 200, { ok: true, dir: info.dir });
+}
+// ---- 学习成果导入（会写配置/档案）----
+if (p === "/api/import/global" && req.method === "POST") {
+if (!ctx.learner) return sendJson(res, 200, { ok: false, error: "导出模块未装配" });
+let body = {};
+try { const b = await readBody(req); body = b ? JSON.parse(b) : {}; } catch (e) { body = {}; }
+if (!body.file) return sendJson(res, 200, { ok: false, error: "缺少 file" });
+try { return sendJson(res, 200, ctx.learner.importGlobal(String(body.file))); }
+catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+}
+if (p === "/api/import/group" && req.method === "POST") {
+if (!ctx.learner) return sendJson(res, 200, { ok: false, error: "导出模块未装配" });
+let body = {};
+try { const b = await readBody(req); body = b ? JSON.parse(b) : {}; } catch (e) { body = {}; }
+if (!body.file) return sendJson(res, 200, { ok: false, error: "缺少 file" });
+try { return sendJson(res, 200, ctx.learner.importGroup(String(body.file), body.groupId ? String(body.groupId) : "")); }
+catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+}
+if (p === "/api/export/open" && req.method === "POST") {
+// 打开导出目录（Windows 资源管理器）
+const info = ctx.learner ? ctx.learner.exportDirInfo() : { dir: "" };
+try {
+if (info.dir) {
+const { spawn } = await import("node:child_process");
+spawn("explorer.exe", [info.dir], { detached: true, stdio: "ignore", windowsHide: true }).unref();
+}
+} catch (e) {}
+return sendJson(res, 200, { ok: true, dir: info.dir });
+}
+if (p === "/api/config" && req.method === "GET") return sendJson(res, 200, { ok: true, config: ctx.config });
+if (p === "/api/config/defaults" && req.method === "GET") return sendJson(res, 200, { ok: true, persona: DEFAULT_PERSONA });
+if (p === "/api/config" && req.method === "PUT") {
+const body = await readBody(req);
+ctx.updateConfig(JSON.parse(body || "{}"));
+return sendJson(res, 200, { ok: true, config: ctx.config });
+}
+if (p === "/api/dsh/detect" && req.method === "POST") {
+return sendJson(res, 200, { ok: true, dsh: detectDsh(ctx.config.brain.dshCliPath) });
+}
+if (p === "/api/stats" && req.method === "GET") return sendJson(res, 200, { ok: true, stats: ctx.getStats() });
+if (p === "/api/rules" && req.method === "GET") return sendJson(res, 200, { ok: true, rules: ctx.getRules() });
+if (p === "/api/rules" && req.method === "PUT") {
+const body = await readBody(req);
+ctx.updateRules(JSON.parse(body || "{}"));
+return sendJson(res, 200, { ok: true, rules: ctx.getRules() });
+}
+if (p === "/api/rules/group" && req.method === "PUT") {
+const body = await readBody(req);
+const parsed = JSON.parse(body || "{}");
+ctx.setGroupRules(String(parsed.groupId), parsed.patch || {});
+return sendJson(res, 200, { ok: true });
+}
+if (p === "/api/rules/effective" && req.method === "GET") {
+const gid = url.searchParams.get("groupId") || "";
+return sendJson(res, 200, { ok: true, rules: ctx.rulesFor(gid) });
+}
+if (p === "/api/audit" && req.method === "GET") {
+const limit = Number(url.searchParams.get("limit") || 100);
+return sendJson(res, 200, { ok: true, audit: ctx.getAudit(limit) });
+}
+if (p === "/api/agent" && req.method === "GET") {
+return sendJson(res, 200, { ok: true, agent: ctx.getAgentStatus() });
+}
+if (p === "/api/agent/reset" && req.method === "POST") {
+const body = await readBody(req);
+const parsed = JSON.parse(body || "{}");
+if (parsed.groupId) ctx.resetSession(String(parsed.groupId));
+return sendJson(res, 200, { ok: true });
+}
+if (p === "/api/secrets" && req.method === "GET") {
+return sendJson(res, 200, { ok: true, secrets: ctx.getSecretsInfo() });
+}
+if (p === "/api/secrets" && req.method === "PUT") {
+const body = await readBody(req);
+const parsed = JSON.parse(body || "{}");
+const patch = {};
+if (typeof parsed.deepseekApiKey === "string") patch.deepseekApiKey = parsed.deepseekApiKey.trim();
+ctx.setSecrets(patch);
+return sendJson(res, 200, { ok: true, secrets: ctx.getSecretsInfo() });
+}
+if (p === "/api/feed/preview" && req.method === "GET") {
+try { return sendJson(res, 200, Object.assign({ ok: true }, await ctx.previewFeed())); }
+catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+}
+if (p === "/api/recharge" && req.method === "GET") return sendJson(res, 200, { ok: true, recharge: ctx.getRechargeStatus() });
+if (p === "/api/recharge/capture" && req.method === "POST") {
+let opts = {};
+try { const b = await readBody(req); opts = b ? JSON.parse(b) : {}; } catch (e) { opts = {}; }
+const r = await ctx.captureRecharge({ force: opts.force !== false, bypassBackoff: !!opts.bypassBackoff });
+return sendJson(res, 200, Object.assign({ recharge: ctx.getRechargeStatus() }, r));
+}
+if (p === "/api/recharge/login" && req.method === "POST") {
+try { return sendJson(res, 200, await ctx.openRechargeLogin()); }
+catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+}
+if (p === "/api/recharge/clear" && req.method === "POST") return sendJson(res, 200, ctx.clearRechargeQrs());
+if (p === "/api/napcat" && req.method === "GET") return sendJson(res, 200, { ok: true, napcat: await ctx.getNapcatStatus() });
+if (p === "/api/napcat/start" && req.method === "POST") {
+let opts = {};
+try { const b = await readBody(req); opts = b ? JSON.parse(b) : {}; } catch (e) { opts = {}; }
+const r = await ctx.startNapcat({ show: !!opts.show });
+return sendJson(res, 200, Object.assign({ napcat: await ctx.getNapcatStatus() }, r));
+}
+if (p === "/api/napcat/stop" && req.method === "POST") {
+const r = await ctx.stopNapcat();
+return sendJson(res, 200, Object.assign({ napcat: await ctx.getNapcatStatus() }, r));
+}
+if (p === "/api/balance" && req.method === "GET") {
+const refresh = url.searchParams.get("refresh") === "1";
+const b = ctx.refreshBalance ? await ctx.refreshBalance(refresh) : (ctx.getBalance ? ctx.getBalance() : null);
+return sendJson(res, 200, { ok: true, balance: b });
+}
+if (p === "/api/usage" && req.method === "GET") return sendJson(res, 200, { ok: true, usage: ctx.getUsage() });
+if (p === "/api/usage" && req.method === "DELETE") { ctx.resetUsage(); return sendJson(res, 200, { ok: true }); }
+if (p === "/api/agent/summarize" && req.method === "POST") {
+const body = await readBody(req);
+const parsed = JSON.parse(body || "{}");
+if (!parsed.groupId) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+const r = await ctx.summarizeGroup(String(parsed.groupId));
+return sendJson(res, 200, { ok: !!r.ok, text: r.text || null, error: r.error || null });
+}
+return sendJson(res, 404, { ok: false, error: "unknown api: " + p });
+}

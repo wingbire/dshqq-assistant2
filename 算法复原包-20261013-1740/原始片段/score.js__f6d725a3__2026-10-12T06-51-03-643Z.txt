@@ -1,0 +1,16 @@
+# 来源会话: dsh-session-f6d725a3-f6dd-407e-bba8-b189127a0c85
+# 记录时间: 2026-10-12T06:51:03.643Z
+# 原始路径名: score.js
+# 提取方式: 文件块(12行,已去行号)
+# ---------- 以下为逐字内容 ----------
+ export const MAX_EXAMPLES = 5;
+ export const TOKEN_WEIGHT = { input: 1, output: 4 };
+ export const COST_SCALE_FALLBACK = 3500;
+ export function defaultScoreConfig() {
+ export function clampScoreConfig(c) {
+ export function costOf(ev) {
+ export function rewardOf(delta, tokensIn, tokensOut, costScale, lambda) {
+ export function costScaleOf(events, fallback) {
+ export function rewardStats(events, cfg, fallbackScale) {
+ export function pickExamples(events, limit) {
+ export function explorationFactor(scoreUcb, n) {

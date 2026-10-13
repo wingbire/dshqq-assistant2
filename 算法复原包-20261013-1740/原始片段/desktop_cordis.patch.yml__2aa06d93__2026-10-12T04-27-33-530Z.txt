@@ -1,0 +1,57 @@
+# 来源会话: dsh-session-2aa06d93-433f-4092-af80-b44e2ca5fdb9
+# 记录时间: 2026-10-12T04:27:33.530Z
+# 原始路径名: desktop cordis.patch.yml
+# 提取方式: 文件块(52行)
+# ---------- 以下为逐字内容 ----------
+# Your patch layer for this dsh profile, applied after every bundle layer:
+# a top-level YAML array of loader patch entries (id-targeted config
+# overrides, disables, and insert lists; `!!js` expressions allowed).
+- id: ui-settings-account
+  name: "@deepseek-ai/dsh-client-ui-settings-account"
+  config:
+    version: 1
+    step: done
+    purpose: both
+    process: standard
+    completion: completed
+    usage: detailed
+    developerTools: true
+- id: ui-chat
+  name: "@deepseek-ai/dsh-client-ui-chat"
+  config:
+    transcriptView: standard
+    performanceUsage: detailed
+- id: ui-settings
+  name: "@deepseek-ai/dsh-client-ui-settings"
+  config:
+    enabled: true
+# 按用户要求移除 @linxin666/dsh-update（该包是 dsh-web-all 的依赖，无法从依赖树摘除，改用它所在的行禁用）
+- id: web-ui-pet
+  name: "@linxin666/dsh-pet"
+  config:
+    visible: false
+    size: 160
+    right: 0
+    bottom: 333
+    petId: whale-girl
+- id: web-ui-session-archive
+  name: "@linxin666/dsh-web-all/session-archive"
+  config:
+    plugin: "@linxin666/dsh-session-archive"
+    autoArchiveEnabled: false
+    autoArchiveDays: 3
+    autoDeleteEnabled: true
+    autoDeleteDays: 3
+- id: web-ui-compat
+  disabled: false
+- id: web-ui-settings
+  disabled: false
+- id: web-u
+
+desktop:72 - id: web-ui-model-capabilities
+desktop:93 - id: agent-default-model
+desktop:94 name: "@deepseek-ai/dsh-agent-default-model"
+desktop:96 provider: deepseek-official
+desktop:97 model: deepseek-flash
+
+"}]

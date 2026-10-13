@@ -1,0 +1,44 @@
+# 来源会话: dsh-session-a93114c7-6f3a-492a-8a95-390cac5bcb70
+# 记录时间: 2026-10-07T17:43:52.563Z
+# 原始路径名: paths.js
+# 提取方式: 文件块(40行,已去行号)
+# ---------- 以下为逐字内容 ----------
+[Function (anonymous)] 
+import path from "node:path";
+import fs from "node:fs";
+import os from "node:os";
+import { fileURLToPath } from "node:url";
+
+export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+
+// 数据目录默认跟程序放在一起（整个文件夹可以拷走），不再塞进 AppData。
+// - 打包运行时：由托盘程序通过 DSHQQ_DATA_DIR 指定 <工作目录>\dsh-data
+// - 开发运行时：APP_ROOT 就是仓库根目录，落到 <仓库根>\dsh-data
+// - 兜底：万一 APP_ROOT 就是数据目录本身（<数据目录>\app），直接返回它
+export function resolveDataRoot() {
+const override = process.env.DSHQQ_DATA_DIR;
+if (override && override.length > 0) return path.resolve(override);
+if (path.basename(APP_ROOT).toLowerCase() === "app") return path.resolve(path.dirname(APP_ROOT));
+return path.resolve(path.join(APP_ROOT, "dsh-data"));
+}
+
+export const DATA_ROOT = resolveDataRoot();
+export const CONFIG_DIR = path.join(DATA_ROOT, "config");
+export const CONFIG_FILE = path.join(CONFIG_DIR, "app.json");
+export const SECRETS_FILE = path.join(CONFIG_DIR, "secrets.json");
+export const DSH_HOME = path.join(DATA_ROOT, "dsh-home");
+export const PERSONA_DIR = path.join(DATA_ROOT, "persona");
+export const GROUPS_DIR = path.join(DATA_ROOT, "data", "groups");
+export const LOG_DIR = path.join(DATA_ROOT, "logs");
+export const FEED_DIR = path.join(DATA_ROOT, "feed");
+export const BALANCE_CACHE_FILE = path.join(DATA_ROOT, "data", "balance.json");
+export const BROWSER_PROFILE_DIR = path.join(DATA_ROOT, "browser-profile");
+
+export function ensureDir(dir) {
+fs.mkdirSync(dir, { recursive: true });
+return dir;
+}
+
+export function ensureBaseDirs() {
+[DATA_ROOT, CONFIG_DIR, DSH_HOME, PERSONA_DIR, GROUPS_DIR, LOG_DIR, FEED_DIR].forEach(ensureDir);
+}

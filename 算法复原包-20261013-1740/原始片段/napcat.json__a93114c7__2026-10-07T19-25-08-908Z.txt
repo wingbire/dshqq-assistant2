@@ -1,0 +1,22 @@
+# 来源会话: dsh-session-a93114c7-6f3a-492a-8a95-390cac5bcb70
+# 记录时间: 2026-10-07T19:25:08.908Z
+# 原始路径名: napcat.json
+# 提取方式: 文件块(18行)
+# ---------- 以下为逐字内容 ----------
+{
+  "fileLog": false,
+  "consoleLog": true,
+  "fileLogLevel": "debug",
+  "consoleLogLevel": "info",
+  "packetBackend": "auto",
+  "packetServer": "",
+  "o3HookMode": 1,
+  "bypass": {
+    "hook": false,
+    "window": false,
+    "module": false,
+    "process": false,
+    "container": false,
+    "js": false
+  }
+}

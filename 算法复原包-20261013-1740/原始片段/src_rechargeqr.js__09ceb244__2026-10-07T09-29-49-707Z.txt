@@ -1,0 +1,109 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T09:29:49.707Z
+# 原始路径名: src/rechargeqr.js
+# 提取方式: 文件块(104行,已去行号)
+# ---------- 以下为逐字内容 ----------
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { ensureDir } from "./paths.js";
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+function findBrowser(explicit) {
+if (explicit && fs.existsSync(explicit)) return explicit;
+const cands = [
+"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+];
+for (const c of cands) if (fs.existsSync(c)) return c;
+return null;
+}
+
+// 找到含指定文字、且文本最短（最具体）的可点元素；返回 null 表示还没渲染出来
+function clickByTextJs(want) {
+return "(()=>{const w=" + JSON.stringify(want) + ";" +
+"const all=[...document.querySelectorAll('*')].filter(e=>{const t=(e.textContent||'').trim();" +
+"return t===w||t==='¥'+w||t==='￥'+w||t===w+'元'||t.includes(w);})" +
+".filter(e=>{const r=e.getBoundingClientRect();return r.width>4&&r.height>4;});" +
+"if(!all.length)return null;" +
+"all.sort((a,b)=>(a.textContent||'').length-(b.textContent||'').length);" +
+"const el=all[0];el.click();" +
+"return{hit:(el.textContent||'').trim().slice(0,16),tag:el.tagName};})()";
+}
+
+// 支付方式那两行（支付宝/微信支付）读不到文本（伪元素渲染），只能靠结构定位：
+// 找到文本为「支付方式」的容器，取里面按 y 排序的第 index 行。0=第一行(支付宝)，1=第二行(微信)
+function clickMethodRowJs(index) {
+return "(()=>{const all=[...document.querySelectorAll('*')];" +
+"const box=all.find(e=>(e.textContent||'').trim()==='支付方式'&&e.getBoundingClientRect().height>80);" +
+"if(!box)return null;" +
+"const rows=[...box.querySelectorAll('*')].map(e=>({e:e,r:e.getBoundingClientRect()}))" +
+".filter(o=>o.r.width>300&&o.r.height>=32&&o.r.height<=80).sort((a,b)=>a.r.y-b.r.y);" +
+"const uniq=[];for(const o of rows){const s=uniq.find(u=>Math.abs(u.r.y-o.r.y)<6);" +
+"if(!s)uniq.push(o);else if(o.r.width<s.r.width)uniq[uniq.indexOf(s)]=o;}" +
+"const pick=uniq[" + index + "];if(!pick)return null;pick.e.click();" +
+"return{y:Math.round(pick.r.y),w:Math.round(pick.r.width),h:Math.round(pick.r.height),tag:pick.e.tagName,rows:uniq.length};})()";
+}
+function findQrJs(selector) {
+if (selector) {
+return "(()=>{const e=document.querySelector(" + JSON.stringify(selector) + ");if(!e)return null;const r=e.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,tag:e.tagName,how:'selector'};})()";
+}
+// 页面上有多个 canvas，不能只挑"最大的正方形"。
+// 真正的二维码一定在支付模态框里，而模态框里有「扫一扫付款」这句话 —— 以此为锚点。
+return "(()=>{" +
+"const sq=function(e){const r=e.getBoundingClientRect();const s=Math.min(r.width,r.height)/Math.max(r.width,r.height);" +
+"return e.tagName&&(e.tagName==='IMG'||e.tagName==='CANVAS')&&r.width>=100&&r.width<=420&&s>=0.9?{e:e,r:r,a:r.width*r.height}:null;};" +
+"const all=[...document.querySelectorAll('*')];" +
+"const modal=all.filter(e=>(e.textContent||'').includes('扫一扫付款')).sort((a,b)=>(a.textContent||'').length-(b.textContent||'').length)[0];" +
+"const scopes=modal?[modal,document]:[document];" +
+"for(const sc of scopes){" +
+"const c=[...sc.querySelectorAll('img,canvas')].map(sq).filter(Boolean).sort((x,y)=>y.a-x.a);" +
+"if(c.length){const o=c[0];try{window.__dshQrEl=o.e;}catch(e){}return{x:o.r.x,y:o.r.y,width:o.r.width,height:o.r.height,tag:o.e.tagName,how:modal?'modal':'page',cands:c.length};}" +
+"}" +
+"return null;})()";
+}
+// 用 CDP 驱动浏览器：Node 自带 WebSocket，不需要任何第三方依赖
+export function createRechargeCapture(ctx, dirs) {
+const feedDir = dirs.feedDir;
+const profileDir = dirs.profileDir;
+let running = false;
+let lastResult = null;
+let lastFailAt = 0;
+
+function autoCfg() {
+const f = (ctx.config.feed && ctx.config.feed.auto) || {};
+return {
+enabled: f
+
+[... tool result middle pruned ...]
+
+: profileText || prev.text || "",
+personaText: personaText || prev.personaText || "",
+lines: lines.length ? lines : (prev.lines || []),
+params: safeParams,
+paramsUpdatedAt: Date.now(),
+rounds: Number(prev.rounds || 0) + 1,
+importedAt: Date.now()
+};
+store.saveGroupProfile(gid, next);
+// 让人设/参数立刻生效
+try { if (ctx.resetSession) ctx.resetSession(gid); } catch (e) {}
+return { ok: true, groupId: gid, profileChars: next.text.length, personaChars: next.personaText.length, lines: next.lines.length, params: safeParams };
+}
+
+// 给 GUI 用：导出目录（找不到就建）
+function exportDirInfo() { return { dir: outDir(null) }; }
+
+return {
+exportGlobal: exportGlobal,
+importGlobal: importGlobal,
+exportGroup: exportGroup,
+importGroup: importGroup,
+buildGlobalBundle: buildGlobalBundle,
+buildGroupBundle: buildGroupBundle,
+exportDirInfo: exportDirInfo
+};
+}"}]

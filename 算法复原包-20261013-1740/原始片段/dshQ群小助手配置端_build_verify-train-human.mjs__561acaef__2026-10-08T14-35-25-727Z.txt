@@ -1,0 +1,22 @@
+# 来源会话: dsh-session-561acaef-e396-40aa-ae95-b0c411ef8346
+# 记录时间: 2026-10-08T14:35:25.727Z
+# 原始路径名: E:\dshQ群小助手配置端\build\verify-train-human.mjs
+# 提取方式: write 全文(after, create)
+# ---------- 以下为逐字内容 ----------
+// 验证 build/train-a
+
+[verify] 人工样本 59 条（应回 23 / 不该回 36）
+[verify] 临时数据目录 C:\Users\13518\AppData\Local\Temp\dsh-RdebE8\dshqq-train-Dqh9um
+[verify] 训练后写入权重文件: false
+[verify] 人工分歧清单: false
+  → 留出集没有更好（53.3% vs 默认 73.3%），保留默认权重
+=== 人工标注样本（面板标注页落盘）===
+  共 59 条：该回 23 / 不该回 36
+            留出 准确率 83.3% · 平衡 81.3% · 漏判 1 / 误判 1（召回 75% / 精确 75%）
+            留出 准确率 66.7% · 平衡 68.8% · 漏判 1 / 误判 3（召回 75% / 精确 50%）
+  → 留出集没有更好（68.8% vs 81.3%），保留现有权重
+  分歧清单已写到 data/addressee-mismatch.jsonl（23 条），可以逐条看过再决定改哪里。
+
+
+
+File sandbox enforcement is partial on this host.

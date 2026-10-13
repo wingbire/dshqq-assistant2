@@ -1,0 +1,385 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:59:11.095Z
+# 原始路径名: src/rechargeqr.js
+# 提取方式: 文件块(381行,已去行号)
+# ---------- 以下为逐字内容 ----------
+import { spawn } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
+import { ensureDir } from "./paths.js";
+
+function sleep(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+
+function findBrowser(explicit) {
+if (explicit && fs.existsSync(explicit)) return explicit;
+const cands = [
+"C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+"C:\\Program Files\\Microsoft\\Edge\\Application\\msedge.exe",
+"C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+"C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"
+];
+for (const c of cands) if (fs.existsSync(c)) return c;
+return null;
+}
+
+// 找到含指定文字、且文本最短（最具体）的可点元素；返回 null 表示还没渲染出来
+function clickByTextJs(want) {
+return "(()=>{const w=" + JSON.stringify(want) + ";" +
+"const all=[...document.querySelectorAll('*')].filter(e=>{const t=(e.textContent||'').trim();" +
+"return t===w||t==='¥'+w||t==='￥'+w||t===w+'元'||t.includes(w);})" +
+".filter(e=>{const r=e.getBoundingClientRect();return r.width>4&&r.height>4;});" +
+"if(!all.length)return null;" +
+"all.sort((a,b)=>(a.textContent||'').length-(b.textContent||'').length);" +
+"const el=all[0];el.click();" +
+"return{hit:(el.textContent||'').trim().slice(0,16),tag:el.tagName};})()";
+}
+
+// 支付方式那两行（支付宝/微信支付）读不到文本（伪元素渲染），只能靠结构定位：
+// 找到文本为「支付方式」的容器，取里面按 y 排序的第 index 行。0=第一行(支付宝)，1=第二行(微信)
+function clickMethodRowJs(index) {
+return "(()=>{const all=[...document.querySelectorAll('*')];" +
+"const box=all.find(e=>(e.textContent||'').trim()==='支付方式'&&e.getBoundingClientRect().height>80);" +
+"if(!box)return null;" +
+"const rows=[...box.querySelectorAll('*')].map(e=>({e:e,r:e.getBoundingClientRect()}))" +
+".filter(o=>o.r.width>300&&o.r.height>=32&&o.r.height<=80).sort((a,b)=>a.r.y-b.r.y);" +
+"const uniq=[];for(const o of rows){const s=uniq.find(u=>Math.abs(u.r.y-o.r.y)<6);" +
+"if(!s)uniq.push(o);else if(o.r.width<s.r.width)uniq[uniq.indexOf(s)]=o;}" +
+"const pick=uniq[" + index + "];if(!pick)return null;pick.e.click();" +
+"return{y:Math.round(pick.r.y),w:Math.round(pick.r.width),h:Math.round(pick.r.height),tag:pick.e.tagName,rows:uniq.length};})()";
+}
+function findQrJs(selector) {
+if (selector) {
+return "(()=>{const e=document.querySelector(" + JSON.stringify(selector) + ");if(!e)return null;const r=e.getBoundingClientRect();return{x:r.x,y:r.y,width:r.width,height:r.height,tag:e.tagName,how:'selector'};})()";
+}
+// 页面上有多个 canvas，不能只挑"最大的正方形"。
+// 真正的二维码一定在支付模态框里，而模态框里有「扫一扫付款」这句话 —— 以此为锚点。
+return "(()=>{" +
+"const sq=function(e){const r=e.getBoundingClientRect();const s=Math.min(r.width,r.height)/Math.max(r.width,r.height);" +
+"return e.tagName&&(e.tagName==='IMG'||e.tagName==='CANVAS')&&r.width>=100&&r.width<=420&&s>=0.9?{e:e,r:r,a:r.width*r.height}:null;};" +
+"const all=[...document.querySelectorAll('*')];" +
+"const modal=all.filter(e=>(e.textContent||'').includes('扫一扫付款')).sort((a,b)=>(a.textContent||'').length-(b.textContent||'').length)[0];" +
+"const scopes=modal?[modal,document]:[document];" +
+"for(const sc of scopes){" +
+"const c=[...sc.querySelectorAll('img,canvas')].map(sq).filter(Boolean).sort((x,y)=>y.a-x.a);" +
+"if(c.length){const o=c[0];try{window.__dshQrEl=o.e;}catch(e){}return{x:o.r.x,y:o.r.y,width:o.r.width,height:o.r.height,tag:o.e.tagName,how:modal?'modal':'page',cands:c.length};}" +
+"}" +
+"return null;})()";
+}
+// 用 CDP 驱动浏览器：Node 自带 WebSocket，不需要任何第三方依赖
+export function createRechargeCapture(ctx, dirs) {
+const feedDir = dirs.feedDir;
+const profileDir = dirs.profileDir;
+let running = false;
+let lastResult = null;
+let lastFailAt = 0;
+
+function autoCfg() {
+const f = (ctx.config.feed && ctx.config.feed.auto) || {};
+return {
+enabled: f.enabled !== false,
+url: f.url || "https://platform.deepseek.com/top_up",
+amount: f.amount == null ? "2" : String(f.amount),
+method: f.method || "微信",
+maxAgeMin: Number(f.maxAgeMin == null ? 10 : f.maxAgeMin),
+port: Number(f.port || 9333),
+browser: f.browser || "",
+qrSelector: f.qrSelector || "",
+amountSelector: f.amountSelector || "",
+methodSelector: f.methodSelector || "",
+methodRowIndex: f.methodRowIndex,
+settleMs: Number(f.settleMs || 2500)
+};
+}
+
+// 清掉 feed 目录里之前抓的旧二维码（按需求：每次要饭都先删旧的）
+function clearOldQrs() {
+const removed = [];
+try {
+if (!fs.existsSync(feedDir)) return removed;
+for (const name of fs.readdirSync(feedDir)) {
+if (!/^recharge-.*\.png$/i.test(name)) continue;
+try { fs.unlinkSync(path.join(feedDir, name)); removed.push(name); } catch (e) {}
+}
+} catch (e) {}
+return removed;
+}
+
+function currentQr() {
+try {
+const files = fs.readdirSync(feedDir).filter(function (n) { return /^recharge-.*\.png$/i.test(n); });
+if (!files.length) return null;
+files.sort();
+const p = path.join(feedDir, files[files.length - 1]);
+const st = fs.statSync(p);
+return { path: p, at: st.mtimeMs, ageMin: (Date.now() - st.mtimeMs) / 60000 };
+} catch (e) { return null; }
+}
+
+function cdp(wsUrl) {
+return new Promise(function (resolve, reject) {
+const ws = new WebSocket(wsUrl);
+let seq = 0;
+const pending = new Map();
+const timer = setTimeout(function () { try { ws.close(); } catch (e) {} reject(new Error("CDP 连接超时")); }, 15000);
+ws.onopen = function () { clearTimeout(timer); resolve({ ws: ws, send: send, close: function () { try { ws.close(); } catch (e) {} } }); };
+ws.onerror = function () { clearTimeout(timer); reject(new Error("CDP 连接失败")); };
+ws.onmessage = function (ev) {
+let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+const p = pending.get(m.id);
+if (!p) return;
+pending.delete(m.id);
+if (m.error) p.reject(new Error(m.error.message || "CDP 错误"));
+else p.resolve(m.result);
+};
+function send(method, params, timeoutMs) {
+return new Promise(function (res, rej) {
+const id = ++seq;
+pending.set(id, { resolve: res, reject: rej });
+try { ws.send(JSON.stringify({ id: id, method: method, params: params || {} })); }
+catch (e) { pending.delete(id); rej(e); return; }
+setTimeout(function () { if (pending.has(id)) { pending.delete(id); rej(new Error("CDP 超时: " + method)); } }, timeoutMs || 30000);
+});
+}
+});
+}
+
+async function evaluate(conn, expr, timeoutMs) {
+const r = await conn.send("Runtime.evaluate", { expression: expr, returnByValue: true, awaitPromise: true }, timeoutMs || 20000);
+if (r && r.exceptionDetails) throw new Error("页面脚本出错: " + JSON.stringify(r.exceptionDetails).slice(0, 200));
+return r && r.result ? r.result.value : null;
+}
+
+// 轮询等到条件成立——页面是懒渲染的，固定 sleep 靠不住
+async function waitFor(conn, expr, timeoutMs, label) {
+const t0 = Date.now();
+while (Date.now() - t0 < timeoutMs) {
+const v = await evaluate(conn, expr);
+if (v) return { value: v, ms: Date.now() - t0 };
+await sleep(500);
+}
+return { value: null, ms: Date.now() - t0, timeout: true, label: label || "" };
+}
+
+async function launch(cfg, visible) {
+const exe = findBrowser(cfg.browser);
+if (!exe) throw new Error("找不到 Edge 或 Chrome，请在配置里指定 feed.auto.browser");
+ensureDir(profileDir);
+const args = [
+"--remote-debugging-port=" + cfg.port,
+"--user-data-dir=" + profileDir,
+visible ? "--new-window" : "--headless=new",
+"--no-first-run",
+"--no-default-browser-check",
+"--disable-session-crashed-bubble",
+cfg.url
+];
+spawn(exe, args, { detached: true, stdio: "ignore", windowsHide: !visible }).unref();
+for (let i = 0; i < 50; i++) {
+try {
+const r = await fetch("http://127.0.0.1:" + cfg.port + "/json/version");
+if (r.ok) return exe;
+} catch (e) {}
+await sleep(400);
+}
+throw new Error("浏览器已启动但调试端口没就绪（端口 " + cfg.port + " 可能被占用）");
+}
+
+async function pageTarget(cfg) {
+for (let i = 0; i < 30; i++) {
+try {
+const list = await (await fetch("http://127.0.0.1:" + cfg.port + "/json/list")).json();
+const pages = (list || []).filter(function (t) { return t.type === "page" && t.webSocketDebuggerUrl; });
+const hit = pages.find(function (t) { return (t.url || "").indexOf("deepseek") >= 0; }) || pages[0];
+if (hit) return hit;
+} catch (e) {}
+await sleep(400);
+}
+throw new Error("找不到可用的浏览器标签页");
+}
+
+function psRun(cmd) {
+return new Promise(function (resolve) {
+import("node:child_process").then(function (cp) {
+const ps = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+cp.execFile(ps, ["-NoProfile", "-Command", cmd], { windowsHide: true, timeout: 15000 }, function (err, stdout) { resolve(String(stdout || "").trim()); });
+}).catch(function () { resolve(""); });
+});
+}
+
+// 这个 profile 是不是已经有浏览器在用了（比如你正开着登录窗口）
+async function profileBusy() {
+const esc = profileDir.replace(/'/g, "''");
+const cmd = "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*" + esc + "*' } | Measure-Object | Select-Object -ExpandProperty Count";
+const out = await psRun(cmd);
+const n = parseInt(out, 10);
+return isNaN(n) ? 0 : n;
+}
+
+// 只关我们自己这个 profile 的浏览器；按进程名过滤，绝不误伤别的进程
+async function shutdown(cfg) {
+const esc = profileDir.replace(/'/g, "''");
+await psRun("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe' OR Name='chrome.exe'\" | Where-Object { $_.CommandLine -like '*" + esc + "*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }");
+}
+
+return {
+// 首次登录：开一个看得见的窗口，登录态会存进 profileDir
+async openForLogin() {
+const cfg = autoCfg();
+await launch(cfg, true);
+return { ok: true, url: cfg.url, profile: profileDir };
+},
+clearOldQrs: clearOldQrs,
+currentQr: currentQr,
+autoCfg: autoCfg,
+status() {
+const c = currentQr();
+const cfg = autoCfg();
+return {
+enabled: cfg.enabled,
+amount: cfg.amount,
+method: cfg.method,
+maxAgeMin: cfg.maxAgeMin,
+profileDir: profileDir,
+hasProfile: fs.existsSync(profileDir),
+needLogin: !fs.existsSync(profileDir),
+current: c ? { file: path.basename(c.path), ageMin: Math.round(c.ageMin * 10) / 10 } : null,
+lastResult: lastResult
+};
+},
+capture: async function (opts) {
+if (running) return { ok: false, error: "上一次抓取还在进行中" };
+const cfg = autoCfg();
+const force = !!(opts && opts.force);
+const bypassBackoff = !!(opts && opts.bypassBackoff);
+// 抓取失败后先歇一会儿，避免每次要饭都去开一次浏览器
+const backoffMs = Number(cfg.maxAgeMin || 10) * 60000;
+if (!bypassBackoff && lastFailAt && (Date.now() - lastFailAt) < backoffMs) {
+return { ok: false, error: "上次抓取失败，暂时跳过", backoff: true, lastResult: lastResult };
+}
+if (!force) {
+const cur = currentQr();
+if (cur && cur.ageMin < cfg.maxAgeMin) return { ok: true, cached: true, path: cur.path, ageMin: Math.round(cur.ageMin * 10) / 10 };
+}
+// 没登录过就别启动浏览器了，白等 7 秒还是抓不到
+// 你自己开着登录窗口时，别去抢这个 profile，也别把它关掉
+const busy = await profileBusy();
+if (busy > 0 && !bypassBackoff) {
+lastResult = { ok: false, error: "浏览器正开着（可能你正在登录），先等你忙完", busy: true };
+return lastResult;
+}
+if (!fs.existsSync(profileDir)) {
+lastResult = { ok: false, error: "还没有登录过 DeepSeek。请先在界面点「打开充值页登录（首次）」登录一次。", needLogin: true };
+return lastResult;
+}
+running = true;
+const started = Date.now();
+let conn = null;
+const steps = [];
+try {
+ensureDir(feedDir);
+const removed = clearOldQrs();
+await launch(cfg, false);
+const target = await pageTarget(cfg);
+conn = await cdp(target.webSocketDebuggerUrl);
+await conn.send("Page.enable", {});
+await conn.send("Runtime.enable", {});
+await sleep(cfg.settleMs);
+
+// 先看看是不是停在登录页——别把「没登录」误报成「找不到二维码」
+const loginJs = "(()=>{const t=(document.body&&document.body.innerText)||'';const has=/(发送验证码|请输入手机号|密码登录|扫码登录)/.test(t);const app=/余额|充值记录|API keys|用量/.test(t);return{login:has&&!app,len:t.length}})()";
+const loginState = await evaluate(conn, loginJs);
+if (loginState && loginState.login) {
+lastFailAt = Date.now();
+lastResult = { ok: false, needLogin: true, error: "浏览器停在登录页，请先点「打开充值页登录（首次）」用手机号登录一次", ms: Date.now() - started };
+await shutdown(cfg);
+running = false;
+return lastResult;
+}
+
+// 1) 等金额出现再点
+const amountJs = cfg.amountSelector
+? "(()=>{const e=document.querySelector(" + JSON.stringify(cfg.amountSelector) + ");if(!e)return null;e.click();return{hit:'selector'};})()"
+ clickByTextJs(cfg.amount);
+const aRes = await waitFor(conn, amountJs, 20000, "金额");
+steps.push({ step: "金额", ok: !!aRes.value, ms: aRes.ms, detail: aRes.value });
+
+// 2) 等支付方式渲染出来再点（之前固定等 1.2 秒会踩空）
+const methodJs = cfg.methodSelector
+? "(()=>{const e=document.querySelector(" + JSON.stringify(cfg.methodSelector) + ");if(!e)return null;e.click();return{hit:'selector'};})()"
+ clickByTextJs(cfg.method);
+// ① 先按文字找（万一以后页面把文字放进了 DOM）
+let mRes = await waitFor(conn, methodJs, 3000, "支付方式");
+
+// ② 找不到就按结构点：支付宝在第一行，微信在第二行
+if (!mRes.value) {
+const wantWechat = String(cfg.method || "").indexOf("微信") >= 0;
+const idx = cfg.methodRowIndex == null ? (wantWechat ? 1 : 0) : Number(cfg.methodRowIndex);
+const rowJs = clickMethodRowJs(idx);
+const rRes = await waitFor(conn, rowJs, 12000, "支付方式行");
+steps.push({ step: "选支付方式(第" + (idx + 1) + "行)", ok: !!rRes.value, ms: rRes.ms, detail: rRes.value });
+if (rRes.value) mRes = { value: rRes.value, ms: rRes.ms };
+}
+steps.push({ step: "支付方式", ok: !!mRes.value, ms: mRes.ms, detail: mRes.value });
+
+// ③ 再点「去支付」，模态框才会带着刚才选的支付方式弹出来
+const goRes = await waitFor(conn, clickByTextJs("去支付"), 12000, "去支付");
+steps.push({ step: "去支付", ok: !!goRes.value, ms: goRes.ms, detail: goRes.value });
+
+// 3) 等二维码出现
+const qRes = await waitFor(conn, findQrJs(cfg.qrSelector), 25000, "二维码");
+steps.push({ step: "二维码", ok: !!qRes.value, ms: qRes.ms, detail: qRes.value });
+const box = qRes.value;
+
+if (!box || !box.width) {
+// 留一张整页截图便于你自己看问题
+const shot = await conn.send("Page.captureScreenshot", { format: "png" }, 20000);
+const dbg = path.join(feedDir, "debug-fullpage.png");
+fs.writeFileSync(dbg, Buffer.from(shot.data, "base64"));
+lastFailAt = Date.now();
+const pageText = await evaluate(conn, "(()=>{const t=(document.body&&document.body.innerText)||'';const i=t.indexOf('支付方式');return i>=0?t.slice(i,i+220).replace(/\\s+/g,' '):t.slice(0,220);})()");
+lastResult = { ok: false, error: "页面上没找到二维码元素", steps: steps, pageText: pageText, debugShot: dbg, ms: Date.now() - started };
+await shutdown(cfg);
+running = false;
+return lastResult;
+}
+
+const PAD = 16;  // 二维码四周留点白，否则定位角被切掉会影响扫码
+const clip = {
+x: Math.max(0, box.x - PAD),
+y: Math.max(0, box.y - PAD),
+width: box.width + PAD * 2,
+height: box.height + PAD * 2,
+scale: 2
+};
+const file = path.join(feedDir, "recharge-" + Date.now() + ".png");
+let savedBy = "screenshot";
+// 直接把 canvas 的像素导出来 —— 比截图准得多，不会混进页面背景，也不会裁到边
+if (box.tag === "CANVAS") {
+try {
+const dataUrl = await evaluate(conn, "(()=>{const c=window.__dshQrEl;if(!c||!c.toDataURL)return null;try{return c.toDataURL('image/png');}catch(e){return null;}})()");
+if (dataUrl && dataUrl.indexOf("data:image/png;base64,") === 0) {
+fs.writeFileSync(file, Buffer.from(dataUrl.split(",")[1], "base64"));
+savedBy = "canvas.toDataURL";
+}
+} catch (e) {}
+}
+if (savedBy === "screenshot") {
+const shot = await conn.send("Page.captureScreenshot", { format: "png", clip: clip, captureBeyondViewport: true }, 20000);
+fs.writeFileSync(file, Buffer.from(shot.data, "base64"));
+}
+lastFailAt = 0;
+lastResult = { ok: true, path: file, removedOld: removed, steps: steps, box: box, savedBy: savedBy, ms: Date.now() - started };
+await shutdown(cfg);
+running = false;
+return lastResult;
+} catch (e) {
+running = false;
+try { if (conn) conn.close(); } catch (e2) {}
+await shutdown(cfg);
+lastFailAt = Date.now();
+lastResult = { ok: false, error: String((e && e.message) || e), steps: steps, ms: Date.now() - started };
+return lastResult;
+}
+}
+};
+}

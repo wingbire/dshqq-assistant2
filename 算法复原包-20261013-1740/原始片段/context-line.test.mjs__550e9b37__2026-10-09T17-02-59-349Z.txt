@@ -1,0 +1,35 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T17:02:59.349Z
+# 原始路径名: context-line.test.mjs
+# 提取方式: 文件块(30行)
+# ---------- 以下为逐字内容 ----------
+1| // 提示词里的"谁在说"这一行：名字必须在标签位，头衔不能贴上去
+2| import test from "node:test";
+3| import assert from "node:assert/strict";
+4| import { formatContextLine, titleRoster } from "../src/triggers.js";
+5| 
+6| test("提示词行：头衔不再贴在名字后面（实测模型会拿它当称呼）", () => {
+7|   const m = { uid: "u1", name: "黑鸟wingbire", title: "黑鸟", role: "owner", self: false, text: "在吗" };
+8|   const line = formatContextLine(m, 100, "群主");
+9|   assert.equal(line, "群主 黑鸟wingbire: 在吗");
+10|   assert.ok(line.indexOf("（黑鸟）") < 0, "名字后面不能再挂头衔");
+11|   assert.equal(formatContextLine({ self: true, text: "我说话" }, 100, ""), "我: 我说话");
+12|   assert.equal(formatContextLine({ uid: "u", name: "A", text: "x".repeat(10) }, 5, ""), "A: xxxxx…");
+13|   assert.equal(formatContextLine(null, 100, ""), "");
+14|   // 头像/名字缺失时退回 uid，不能让行变成 ": 内容"
+15|   assert.equal(formatContextLine({ uid: "12345", name: "", text: "嗨" }, 100, ""), "12345: 嗨");
+16| });
+17| 
+18| test("头衔名册：同一人只出现一次、最多 N 条、自己不算", () => {
+19|   const list = [
+20|     { uid: "u1", name: "黑鸟", title: "黑鸟", self: false },
+21|     { uid: "u1", name: "黑鸟", title: "黑鸟", self: false },
+22|     { uid: "u2", name: "银狼", title: "潜水员", self: false },
+23|     { uid: "u3", name: "没头衔", title: "", self: false },
+24|     { uid: "bot", name: "我", title: "不该出现", self: true }
+25|   ];
+26|   assert.deepEqual(titleRoster(list, 6), ["黑鸟=黑鸟", "银狼=潜水员"]);
+27|   assert.deepEqual(titleRoster(list, 1), ["黑鸟=黑鸟"]);
+28|   assert.deepEqual(titleRoster(null, 6), []);
+29|   assert.deepEqual(titleRoster([{ uid: "u", name: "A", title: "t" }], 6), ["A=t"]);
+30| });"}]

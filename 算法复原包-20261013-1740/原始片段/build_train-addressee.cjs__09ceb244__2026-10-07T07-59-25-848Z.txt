@@ -1,0 +1,33 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:59:25.848Z
+# 原始路径名: build/train-addressee.cjs
+# 提取方式: 文件块(29行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 收件人判定的离线训练与回测（留出法：训练集调权重，测试集看泛化）
+const fs = require('fs');
+const ROOT = 'E:/dshQ群小助手配置端';
+
+async function main() {
+const mod = await import('file:///E:/dshQ群小助手配置端/src/addressee.js');
+const createAddressee = mod.createAddressee, DEFAULT_WEIGHTS = mod.DEFAULT_WEIGHTS;
+const CORPUS = fs.readFileSync(ROOT + '/build/train/corpus-real.jsonl', 'utf8').trim().split(String.fromCharCode(10)).map(l => JSON.parse(l));
+const ALL = fs.readFileSync(ROOT + '/build/train/scenarios.jsonl', 'utf8').trim().split(String.fromCharCode(10)).map(l => JSON.parse(l));
+// 固定切分：按 id 数字排序后每 4 条取 1 条做测试集（避免随机性）
+const sorted = ALL.slice().sort((a, b) => parseInt(a.id.slice(1), 10) - parseInt(b.id.slice(1), 10));
+const TEST = sorted.filter((s, i) => i % 4 === 0), TRAIN = sorted.filter((s, i) => i % 4 !== 0);
+console.log('训练集 ' + TRAIN.length + ' 条 / 测试集 ' + TEST.length + ' 条');
+const GID = '255452871', NOW = 1800000000000;
+
+function judgeOne(W, s) {
+const ad = createAddressee({ now: () => NOW, weights: W });
+for (const c of CORPUS) ad.observe(GID, { text: c.text, userId: 'corpus' });
+const botAt = NOW - Number(s.gap || 0);
+const inter = [];
+let clock = botAt + 1000;
+for (const it of (s.inter || [])) { ad.observe(GID, { text: it.text, userId: it.user, afterBot: true }); inter.push({ userId: it.user, text: it.text, at: clock }); clock += 1000; }
+const jr = ad.judge(GID, { text: s.msg, userId: s.user || 'u1', mentionsBot: !!s.mentionsBot, replyToBot: false,
+lastBotText: s.bot, lastBotAt: botAt, interjections: inter,
+myUnansweredQuestion: /[?？]\s*$/.test(String(s.bot || '')), recentSpeakers: Number(s.speakers || 3) });
+const d = ad.deltaForJudge(jr);
+const kind = d.delta === null ? 'no' : (d.delta >= 2 ? 'toBot' : d.delta === 1 ? 'mid' : d.delta === 0 ? 'toNeutral' : 'neg');
+return { jr: jr, d: d, kind: kind };

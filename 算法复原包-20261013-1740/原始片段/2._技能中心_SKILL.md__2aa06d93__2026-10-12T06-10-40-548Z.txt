@@ -1,0 +1,10 @@
+# 来源会话: dsh-session-2aa06d93-433f-4092-af80-b44e2ca5fdb9
+# 记录时间: 2026-10-12T06:10:40.548Z
+# 原始路径名: 2. 技能中心 SKILL.md
+# 提取方式: 文件块(6行)
+# ---------- 以下为逐字内容 ----------
+  路径: C:\Users\13518\.dsh\skills\engineering-discipline\SKILL.md
+  大小: 6801 字节
+  frontmatter 字段: name, description, version
+  name: engineering-discipline
+  实测状态: ✓ 已出现在 <available-skills> 目录里

@@ -1,0 +1,112 @@
+# 来源会话: dsh-session-829e8815-fecd-47ed-9ee5-d0a683673b55
+# 记录时间: 2026-10-12T08:41:13.024Z
+# 原始路径名: config.json
+# 提取方式: 文件块(108行,已去行号)
+# ---------- 以下为逐字内容 ----------
+{
+"ffmpeg": "E:\\ffmpeg\\bin\\ffmpeg.exe",
+"ffprobe": "E:\\ffmpeg\\bin\\ffprobe.exe",
+"edgeTts": "C:\\Users\\13518\\AppData\\Local\\Programs\\Python\\Python312\\Scripts\\edge-tts.exe",
+"edge": "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+"video": {
+"width": 1920,
+"height": 1080,
+"fps": 30,
+"captionBandHeight": 80,
+"imagePadColor": "0x101319"
+},
+"tts": {
+"engine": "edge-tts",
+"voice": "zh-CN-YunxiNeural",
+"rate": "-4%",
+"gapMs": 350,
+"gptSovits": {
+"python": "E:\\GPT-SoVITS\\.venv\\Scripts\\python.exe",
+"script": "E:\\GPT-SoVITS\\	ts_batch.py",
+"timeoutMs": 3600000
+},
+"lastGood": "gpt-sovits"
+},
+"subtitle": {
+"font": "Microsoft YaHei",
+"fontSize": 46,
+"marginV": 18,
+"outline": 3
+},
+"bgm": {
+"volume": 0.32,
+"duckThreshold": 0.05,
+"duckRatio": 8,
+"python": "E:\\大肥鱼形象生成环境搭建\\.venv\\Scripts\\python.exe",
+"pyScript": "E:\\AI视频工作流\\	ools\\make-bgm.py"
+},
+"server": {
+"port": 17890
+},
+"paths": {
+"workspace": "E:\\AI视频制作"
+},
+"card": {
+"theme": "light",
+"showTime": true,
+"showAvatar": true,
+"maxMessagesPerCard": 9
+},
+"napcat": {
+"url": "ws://127.0.0.1:3001",
+"token": "",
+"groupId": 255452871,
+"botUserId": 3562614549,
+"ownerUserId": 1351846399,
+"autoConfigPath": "E:\\dshQ群小助手配置端\\dsh-data\\config\\app.json"
+},
+"llm": {
+"baseUrl": "https://api.deepseek.com/v1",
+"model": "deepseek-chat",
+"apiKey": "",
+"temperature": 0.7,
+"maxTokens": 4096,
+"search": {
+"provider": "none",
+"apiKey": "",
+"baseUrl": "",
+"maxResults": 5
+},
+"prompts": {}
+},
+"dsh": {
+"cmd": "E:\\DeepseekHrness\\
+esources\\
+untime\\cli\\bin\\dsh.cmd",
+"profile": "headless",
+"timeoutMs": 900000
+},
+"research": {
+"enabled": true
+},
+"media": {
+"pexelsKey": "",
+"pixabayKey": "57996095-714ffc5ca6397174beaffbbbf",
+"bingScrape": true
+},
+"audit": {
+"enabled": true,
+"baseUrl": "https://api.deepseek.com/v1",
+"model": "deepseek-chat",
+"apiKey": "",
+"timeoutMs": 420000,
+"checks": {
+"styleMatch": true,
+"shotMatch": true,
+"aesthetics": true
+},
+"note": "外审层：换一个独立接口/模型评审。timeoutMs 要够大——MiMo 是推理模型，画面评审（多节+长指令）实测会超过 120 秒。",
+"mode": "dsh",
+"dshModel": "mimo-v2.6-flash-free",
+"patchFile": "E:\\AI视频工作流\\app\\lib\\audit-model.patch.yml"
+},
+"bili": {
+"cookie": "",
+"note": "填 B 站的 SESSDATA 等 cookie 后，可拿到 AI 字幕；不填也能用（无字幕时只靠画面分析）"
+}
+}

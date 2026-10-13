@@ -1,0 +1,209 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:58:20.285Z
+# 原始路径名: src/profile.js
+# 提取方式: 文件块(204行,已去行号)
+# ---------- 以下为逐字内容 ----------
+import { parseLessonLines } from "./lessonmatch.js";
+
+// 群档案升级：提炼结果里除了档案正文，还允许模型给出
+//   ① 本群专属人设补充  ② 本群专属参数建议
+// 这里负责把模型输出切成结构化字段，并把参数建议夹到安全范围内——
+// 模型可以"调参"，但只能在我们允许的旋钮和区间里调，绝不碰规则/权限类设置。
+
+// 允许模型调整的参数白名单。
+// 第一层是硬边界（任何情况下都不许超出），第二层是"相对全局值的比例带"——
+// 自动调整只能在 [floor, max(globalValue, ceil)] 这个交集里动，避免模型一次把参与度带偏。
+export const PARAM_BOUNDS = {
+rate:                 { min: 0.15, max: 0.6, band: [0.6, 1.6], ceil: 0.45 },   // 主动参与概率
+minGapSec:            { min: 30,  max: 180, band: [0.6, 1.5] },               // 两次主动搭话最小间隔
+scoreThreshold:       { min: 1,   max: 4,   band: [0.6, 1.4] },               // 主动参与评分门槛
+continueRate:         { min: 0.7, max: 1,   band: [0.85, 1] },                // 对话延续概率
+continueGapSec:       { min: 1,   max: 10,  band: [0.5, 2] },                 // 延续最小间隔
+continueMaxPerHour:   { min: 15,  max: 80,  band: [0.5, 2] },                 // 延续每小时上限
+perMinute:            { min: 2,   max: 8,   band: [0.6, 1.6] },               // 每群每分钟回复上限
+cooldownSec:          { min: 2,   max: 15,  band: [0.6, 1.2] },               // 同一人冷却
+// ---- 统一效用判定（六因子）的阈值与代价权重 ----
+utilitySpeakAt:       { min: 0.02, max: 0.5, band: [0.5, 3] },                // 开口阈值：U 低于它就不回复（调大 = 更少说）
+utilityTerseAt:       { min: 0.05, max: 0.8, band: [0.5, 3] },                // 常规档阈值
+utilityDetailedAt:    { min: 0.1,  max: 1.5, band: [0.5, 3] },                // 多讲两句档阈值
+utilityLambda:        { min: 0,    max: 3,   band: [0.3, 3] },                // 代价权重：调大 = 更抠 token
+};
+
+// 参数支持两种写法：嵌套（{"autoJoin":{"rate":0.4}}，模型/手写更自然）
+// 或摊平（{"autoJoin.rate":0.4}）。统一取成"参数名 -> 值"。
+export const AUTOJOIN_KEYS = ["rate", "minGapSec", "scoreThreshold", "continueRate", "continueGapSec", "continueMaxPerHour"];
+
+function flattenRaw(input) {
+const raw = {};
+if (!input || typeof input !== "object") return raw;
+for (const k of AUTOJOIN_KEYS) if (input[k] !== undefined) raw[k] = input[k];
+for (const k of ["perMinute", "cooldownSec"]) if (input[k] !== undefined) raw[k] = input[k];
+const nested = input.autoJoin;
+if (nested && typeof nested === "object") {
+for (const k of AUTOJOIN_KEYS) if (nested[k] !== undefined) raw[k] = nested[k];
+}
+for (const k of Object.keys(input)) {
+if (k.indexOf("autoJoin.") === 0) raw[k.slice(9)] = input[k];
+}
+return raw;
+}
+
+// 参数不属于同一个层级：autoJoin 下的写进 gates.autoJoin，顶层直接写 gates
+// eslint-disable-next-line no-unused-vars
+function isAutoJoinKey(k) { return AUTOJOIN_KEYS.indexOf(k) >= 0; }
+
+// 互动反馈的乘数用来对待采纳的调整"加宽/收窄"：正反馈 → 更敢动；负反馈 → 更保守
+export function bandShape(band, factor) {
+if (!band || !(factor > 0)) return band;
+const lo = band[0] <= 0 ? band[0] : band[0] / factor;
+const hi = band[1] >= 0 ? band[1] * factor : band[1];
+return [Math.min(lo, hi), Math.max(lo, hi)];
+}
+
+// 全局值 -> 带内允许的范围（直接按全局 gates 的层级取值）
+export function bandFor(key, globalGates) {
+const b = PARAM_BOUNDS[key];
+if (!b) return null;
+let lo = b.min, hi = b.max;
+if (b.band && globalGates) {
+const gv = isAutoJoinKey(key) ? Number(globalGates.autoJoin && globalGates.autoJoin[key]) : Number(globalGates[key]);
+if (Number.isFinite(gv) && gv > 0) {
+const bl = gv * b.band[0];
+const bh = gv * b.band[1];
+lo = Math.max(lo, Math.min(bl, bh));
+hi = Math.min(hi, Math.max(bl, bh));
+if (b.ceil !== undefined) hi = Math.min(hi, Math.max(gv, b.ceil));
+}
+}
+if (hi < lo) hi = lo;
+return [lo, hi];
+}
+
+// 把"已落盘的参数"夹进安全带，并只返回与全局不同的部分（供浅合并）
+export function applyBand(params, globalGates, factor) {
+const raw = flattenRaw(params);
+const out = {};
+for (const key of Object.keys(PARAM_BOUNDS)) {
+if (raw[key] === undefined || raw[key] === null || raw[key] === "") continue;
+const x = Number(raw[key]);
+if (!Number.isFinite(x)) continue;
+const r = bandShape(bandFor(key, globalGates), factor);
+if (!r) continue;
+const clamped = Math.round(Math.min(r[1], Math.max(r[0], x)) * 1000) / 1000;
+const gv = isAutoJoinKey(key) ? Number(globalGates && globalGates.autoJoin && globalGates.autoJoin[key]) : Number(globalGates && globalGates[key]);
+if (clamped !== gv) out[key] = clamped;
+}
+return out;
+}
+
+const SECTION_ARCHIVE = ["群档案", "档案", "archive"];
+const SECTION_PERSONA = ["本群人设补充", "本群补充人设", "群专属人设", "人设补充", "persona"];
+const SECTION_PARAMS = ["参数建议", "建议参数", "调参建议", "params"];
+const SECTION_LINES = ["经验教训", "经验", "lessons"];
+export const MAX_LESSONS = 8;
+
+function stripFence(s) {
+return String(s || "").replace(/^```[a-zA-Z]*\s*/m, "").replace(/```\s*$/m, "").trim();
+}
+
+// 找出 "===标题===" 或 "【标题】" 形式的小节
+function splitSections(text) {
+const t = stripFence(text);
+const lines = t.split("\
+");
+const out = [];
+let cur = { title: "", body: [] };
+for (const line of lines) {
+const m = line.match(/^\s*(?:={2,}\s*)?[【\[]?([^】\]={}]{1,20})[】\]]?\s*(?:={2,})?\s*$/);
+const isHead = !!m && line.indexOf("=") >= 0;
+if (isHead) { out.push(cur); cur = { title: m[1].trim(), body: [] }; continue; }
+cur.body.push(line);
+}
+out.push(cur);
+return out.filter(function (s) { return s.title || s.body.join("").trim(); });
+}
+
+function pickSection(sections, names) {
+for (const s of sections) {
+const title = String(s.title || "").replace(/\s/g, "");
+if (!title) continue;
+for (const n of names) if (title.indexOf(n) >= 0) return s.body.join("\
+").trim();
+}
+return "";
+}
+
+// 写入白名单（不含下面这个函数用到的 boundsAt 依赖）
+export function clampParams(input, globalGates) {
+const out = {};
+const raw = flattenRaw(input);
+for (const key of Object.keys(PARAM_BOUNDS)) {
+if (raw[key] === undefined || raw[key] === null || raw[key] === "") continue;
+const x = Number(raw[key]);
+if (!Number.isFinite(x)) continue;
+const r = bandFor(key, globalGates);
+const lo = r ? r[0] : PARAM_BOUNDS[key].min;
+const hi = r ? r[1] : PARAM_BOUNDS[key].max;
+out[key] = Math.round(Math.min(hi, Math.max(lo, x)) * 1000) / 1000;
+}
+return out;
+}
+
+// 从模型输出里抽结构化档案
+export function parseProfile(text) {
+const raw = stripFence(text);
+const sections = splitSections(raw);
+if (!sections.length) return { profileText: raw, personaText: "", params: {} };
+const archive = pickSection(sections, SECTION_ARCHIVE);
+const persona = pickSection(sections, SECTION_PERSONA);
+const paramsRaw = pickSection(sections, SECTION_PARAMS);
+
+// 参数节现在可能是两行：「参数：{...}」+「理由：...」
+// 先只取含 { 的那一行解析（避免把理由里的中文和花括号混进来导致整节作废）
+let params = {};
+let paramsReason = "";
+if (paramsRaw) {
+const raw = paramsRaw.trim();
+const lines = raw.split("\
+");
+let jsonText = "";
+for (const ln of lines) {
+const s = ln.trim();
+if (s.indexOf("{") >= 0 && s.indexOf("}") > s.indexOf("{")) { jsonText = s.slice(s.indexOf("{")); break; }
+}
+if (!jsonText) {
+const brace = raw.indexOf("{");
+if (brace >= 0) jsonText = raw.slice(brace);
+}
+try { params = clampParams(JSON.parse(jsonText)); } catch (e) { params = {}; }
+const rm = raw.match(/理由\s*[:：]\s*([\s\S]{0,200})/);
+if (rm) paramsReason = rm[1].trim().replace(/\s+/g, " ");
+}
+const lines = parseLessons(pickSection(sections, SECTION_LINES));
+// 没有小节结构时（旧格式或模型偷懒）：整段当档案，其余留空
+const hasStructure = !!archive || !!persona || !!lines.length || Object.keys(params).length > 0;
+return {
+profileText: hasStructure ? (archive || "") : raw,
+personaText: persona || "",
+params: params,
+paramsReason: paramsReason,
+lines: lines
+};
+}
+
+// 经验教训：一行一条，去掉编号/项目符号，最多留 MAX_LESSONS 条
+export function parseLessons(text) {
+const t = stripFence(text);
+if (!t || /^无\s*$/.test(t.trim())) return [];
+const out = [];
+for (const raw of parseLessonLines(t.split("\
+"))) {
+const s = String(raw.text || "").trim();
+if (!s || /^无[。.]?$/.test(s)) continue;
+let text = s;
+if (text.length > 80) text = text.slice(0, 80);
+out.push({ text: text, keys: raw.keys || [] });
+if (out.length >= MAX_LESSONS) break;
+}
+return out;
+}"}]

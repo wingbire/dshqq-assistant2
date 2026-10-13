@@ -1,0 +1,136 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T09:29:41.456Z
+# 原始路径名: src/score.js
+# 提取方式: 文件块(131行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 代价感知的互动评分（cost-aware reward）。
+//
+// 设计参考（搜索到的相关工作）：
+//  1) "Reinforcing Real-world Service Agents: Balancing Utility and Cost in Task-oriented Dialogue"
+//     (ICML 2026, InteractCS-RL)：把"共情/有用"和"预算"一起放进 RL 的 reward，做多轮成本感知决策。
+//     → 对应我们这里的"互动分 - λ·token代价"。
+//  2) RouteLLM 一类的 LLM 路由：在"质量-成本"之间做动态取舍，按平均输出长度/单价估成本。
+//     → 对应我们按"计费 token"归一化代价，而不是按条数。
+//  3) "Not all turns are equally hard: Adaptive thinking budgets for efficient multi-turn reasoning"：
+//     不同轮次给不同思考预算，省 token 又不掉效果。
+//     → 对应我们让"发言频率/长度/是否搜索"这类旋钮由代价感知的分数来调。
+//  4) 多目标优化的经典做法：标量化（加权和 / 拉格朗日罚项）+ 近端探索（UCB / 折扣）。
+//     单一标量分容易过早收敛到局部最优，所以这里加了
+//       · 指数折扣：更看重最近的互动（环境会变）
+//       · UCB 探索加成：样本少时给一点"再试一次"的推动
+//       · 帕累托前沿：同时看互动分和 token 效率，避免"又贵又没人理"还不自知
+//
+// 核心公式（每条互动得一个 reward）：
+//   engagement  = 已有的互动分（+4 接着聊并叫外号 / +2 接着说 / -1 没人接 / -2 嫌烦 …）
+//   cost        = 归一化代价 = (未命中输入 + 2×输出)  ← 与真实计费口径一致（缓存读 ¥0.02 vs 未命中 ¥1 vs 输出 ¥4）
+//   reward      = engagement - λ × cost / costScale        （λ = gates.tokenCostPenalty，默认 1.0）
+//   score_ema   = 指数折扣平均（alpha 默认 0.25，约等于最近 ~4 条说话）
+//   score_ucb   = score_ema + β·sqrt(refN / (1+n))          （探索加成，样本多时自动收敛）
+// λ 与 costScale 都可以在配置里调：λ 调大 = 更抠门，调小 = 更看重聊天效果。
+
+export const MAX_EXAMPLES = 5;
+export const TOKEN_WEIGHT = { input: 1, output: 2 };   // 计费口径的简版加权
+
+export function defaultScoreConfig() {
+return { lambda: 1.0, alpha: 0.25, beta: 0.8, refN: 20 };
+}
+
+export function clampScoreConfig(c) {
+const d = defaultScoreConfig();
+const n = (v, dv) => { const x = Number(v); return Number.isFinite(x) ? x : dv; };
+const cl = (x, lo, hi) => Math.min(hi, Math.max(lo, x));
+return {
+lambda: cl(n(c && c.lambda, d.lambda), 0, 5),
+alpha: cl(n(c && c.alpha, d.alpha), 0.05, 1),
+beta: cl(n(c && c.beta, d.beta), 0, 3),
+refN: Math.round(cl(n(c && c.refN, d.refN), 5, 200))
+};
+}
+
+// 单条互动的归一化代价
+export function costOf(ev) {
+const input = Number((ev && ev.tokensIn) || 0);
+const output = Number((ev && ev.tokensOut) || 0);
+return input * TOKEN_WEIGHT.input + output * TOKEN_WEIGHT.output;
+}
+
+// 滑动窗口的成本量纲（每条互动的平均代价），用来把 token 数缩放到"和互动分同一量级"
+export function costScaleOf(events, fallback) {
+const list = (events || []).filter(function (e) { return e && e.closed && e.delta !== null; });
+if (!list.length) return Number(fallback) > 0 ? Number(fallback) : 3000;
+let sum = 0;
+for (const e of list) sum += costOf(e);
+const avg = sum / list.length;
+return avg > 0 ? avg : Number(fallback) > 0 ? Number(fallback) : 3000;
+}
+
+// reward + 折扣 + UCB + 帕累托
+export function rewardStats(events, cfg, fallbackScale) {
+const c = clampScoreConfig(cfg);
+const list = (events || []).filter(function (e) { return e && e.closed && e.delta !== null; });
+const n = list.length;
+const costScale = costScaleOf(list, fallbackScale);
+const base = {
+n: n,
+costScale: Math.round(costScale),
+lambda: c.lambda,
+avgEngagement: 0,
+avgCostTokens: 0,
+avgCostCostScale: 0,
+scoreEma: 0,
+scoreUcb: 0,
+efficiency: 0,          // 互动分 / 归一化代价（越大越"省着聊还能聊"）
+pareto: [],
+recent: []
+};
+if (!n) return base;
+
+const rows = list.map(function (e) {
+const cost = costOf(e);
+return { e: e, engagement: Number(e.delta), cost: cost, norm: cost / costScale };
+});
+
+let sumE = 0, sumC = 0, sumNorm = 0;
+for (const r of rows) { sumE += r.engagement; sumC += r.cost; sumNorm += r.norm; }
+base.avgEngagement = Math.round((sumE / n) * 100) / 100;
+base.avgCostTokens = Math.round(sumC / n);
+base.avgCostCostScale = Math.round((sumNorm / n) * 1000) / 1000;
+base.efficiency = base.avgCostTokens > 0 ? Math.round((base.avgEngagement / base.avgCostTokens) * 1e6) / 1e6 : 0;
+
+// 指数折扣平均（时间加权的 reward）
+let ema = 0, w = 0;
+for (let i = 0; i < rows.length; i++) {
+co
+
+[... tool result middle pruned ...]
+
+].trim().replace(/\s+/g, " ");
+}
+const lines = parseLessons(pickSection(sections, SECTION_LINES));
+// 没有小节结构时（旧格式或模型偷懒）：整段当档案，其余留空
+const hasStructure = !!archive || !!persona || !!lines.length || Object.keys(params).length > 0;
+return {
+profileText: hasStructure ? (archive || "") : raw,
+personaText: persona || "",
+params: params,
+paramsReason: paramsReason,
+lines: lines
+};
+}
+
+// 经验教训：一行一条，去掉编号/项目符号，最多留 MAX_LESSONS 条
+export function parseLessons(text) {
+const t = stripFence(text);
+if (!t || /^无\s*$/.test(t.trim())) return [];
+const out = [];
+for (const raw of parseLessonLines(t.split("\
+"))) {
+const s = String(raw.text || "").trim();
+if (!s || /^无[。.]?$/.test(s)) continue;
+let text = s;
+if (text.length > 80) text = text.slice(0, 80);
+out.push({ text: text, keys: raw.keys || [] });
+if (out.length >= MAX_LESSONS) break;
+}
+return out;
+}"}]

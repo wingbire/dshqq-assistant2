@@ -1,0 +1,117 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T13:48:21.941Z
+# 原始路径名: build/check.mjs
+# 提取方式: 文件块(113行)
+# ---------- 以下为逐字内容 ----------
+1| import fs from "node:fs";
+2| import path from "node:path";
+3| import { fileURLToPath } from "node:url";
+4| const HERE = path.dirname(fileURLToPath(import.meta.url));
+5| const ROOT = process.argv[2] || path.resolve(HERE, "..");
+6| const KW = new Set("if for while switch catch return function typeof new await async in of do else try this super delete void throw case break continue default class extends yield static get set import export from const let var instanceof with debugger finally".split(" "));
+7| const GLOB = new Set("console Math JSON Object Array String Number Boolean Date Promise Set Map RegExp Error Symbol parseInt parseFloat isNaN isFinite encodeURIComponent decodeURIComponent setTimeout clearTimeout setInterval clearInterval require process Buffer structuredClone URL URLSearchParams fetch AbortController TextEncoder TextDecoder globalThis undefined null true false NaN Infinity arguments module exports __dirname __filename BigInt WeakMap WeakSet Proxy Reflect Intl WebSocket queueMicrotask atob btoa performance navigator Float32Array Float64Array Int16Array Int32Array Int8Array Uint8Array Uint16Array Uint32Array ArrayBuffer DataView".split(" "));
+8| // 扫描器自己插进文本的占位符，以及一些语义上永远"已声明"的名字，不该被当成未声明标识符
+9| const NOISE = new Set(["RE", "STR", "constructor"]);
+10| // 判断某个 "/" 是不是正则字面量的开始。
+11| // 原来的实现看 out 的**最后一个字符**，而 "= /re/" 里 "=" 后面有个空格，
+12| // 于是测试失败 → 正则体整个漏进标识符表，这就是那 101 处噪声的主要来源。
+13| const REGEX_PREV = /[=(,:!&|?+\[{;}]/;
+14| const REGEX_KW = /^(return|typeof|case|in|of|delete|void|new|do|else|yield|instanceof)$/;
+15| function lastNonSpace(s) {
+16|   for (let i = s.length - 1; i >= 0; i--) {
+17|     const c = s[i];
+18|     if (c !== " " && c !== "\	" && c !== "\
+" && c !== "\
+") return c;
+19|   }
+20|   return "";
+21| }
+22| function regexAllowed(s) {
+23|   const c = lastNonSpace(s);
+24|   if (c === "") return true;
+25|   if (REGEX_PREV.test(c)) return true;
+26|   const w = (s.match(/([A-Za-z_$][\w$]*)\s*$/) || [])[1] || "";
+27|   return REGEX_KW.test(w);
+28| }
+29| 
+30| function strip(src) {
+31|   let out = ""; let i = 0; const n = src.length;
+32|   while (i < n) {
+33|     const c = src[i], d = i + 1 < n ? src[i + 1] : "";
+34|     if (c === "/" && d === "/") { while (i < n && src[i] !== String.fromCharCode(10)) i++; continue; }
+35|     if (c === "/" && d === "*") { i += 2; while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++; i += 2; continue; }
+36|     if (c === String.fromCharCode(96)) { i++; let depth = 0; while (i < n) { if (src[i] === "\\") { i += 2; continue; } if (src[i] === "$" && src[i + 1] === "{") { depth++; i += 2; continue; } if (src[i] === "}" && depth > 0) { depth--; i++; continue; } if (src[i] === String.fromCharCode(96) && depth === 0) { i++; break; } i++; } out += " STR "; continue; }
+37|     if (c === String.fromCharCode(39) || c === String.fromCharCode(34)) { const q = c; i++; while (i < n && src[i] !== q) { if (src[i] === "\\") i++; i++; } i++; out += " STR "; continue; }
+38|     if (c === "/" && regexAllowed(out)) {
+39|       i++;
+40|       let inClass = false;
+41|       while (i < n) {
+42|         if (src[i] === "\\") { i += 2; continue; }
+43|         if (src[i] === "[") inClass = true;
+44|         else if (src[i] === "]") inClass = false;
+45|         else if (src[i] === "/" && !inClass) { i++; while (i < n && /[a-z]/.test(src[i])) i++; break; }   // 顺带吃掉 gm/i 这类标志
+46|         else if (src[i] === String.fromCharCode(10) && !inClass) break;   // 正则不能跨行
+47|         i++;
+48|       }
+49|       out += " RE ";
+50|       continue;
+51|     }
+52|     out += c; i++;
+53|   }
+54|   return out;
+55| }
+56| const files = fs.readdirSync(ROOT + "/src").filter(f => f.endsWith(".js"));
+57| let totalFlags = 0;
+58| for (const f of files) {
+59|   const raw = fs.readFileSync(ROOT + "/src/" + f, "utf8");
+60|   const text = strip(raw);
+61|   const declared = new Set();
+62|   for (const m of text.matchAll(/\b(?:const|let|var|function|class)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+63|   for (const m of text.matchAll(/import\s*\{([^}]*)\}\s*from/g)) for (const p of m[1].split(",")) { const nm = p.trim().split(/\s+as\s+/).pop().trim(); if (nm) declared.add(nm); }
+64|   for (const m of text.matchAll(/import\s+([A-Za-z_$][\w$]*)\s*(?:,|from)/g)) declared.add(m[1]);
+65|   for (const m of text.matchAll(/import\s*\*\s*as\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+66|   for (const m of text.matchAll(/function\s*[A-Za-z0-9_$]*\s*\(([^)]*)\)/g)) for (const p of m[1].split(",")) { const nm = p.trim().split(/[=\s]/)[0].trim(); if (nm) declared.add(nm.replace("...", "")); }
+67|   for (const m of text.matchAll(/\(([^()]*)\)\s*=>/g)) for (const p of m[1].split(",")) { const nm = p.trim().split(/[=\s]/)[0].trim(); if (nm) declared.add(nm.replace("...", "")); }
+68|   for (const m of text.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) declared.add(m[1]);
+69|   for (const m of text.matchAll(/\bfor\s*\(\s*(?:const|let|var)\s+([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+70|   for (const m of text.matchAll(/\b(?:const|let|var)\s+([^;\
+]+)/g)) {
+71|     for (const part of m[1].split(",")) {
+72|       const nm = part.trim().split(/[=\s]/)[0].replace(/[[\]]/g, "").trim();
+73|       if (/^[A-Za-z_$][\w$]*$/.test(nm)) declared.add(nm);
+74|     }
+75|   }
+76|   for (const m of text.matchAll(/\b(?:get|set)\s+([A-Za-z_$][\w$]*)\s*\(/g)) declared.add(m[1]);
+77|   // catch (err) —— 以前只收 function 的参数，catch 参数漏了
+78|   for (const m of text.matchAll(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g)) declared.add(m[1]);
+79|   // 类成员 / 对象字面量里的方法简写（含 async / static）：reconfigure(next) { }、async openForLogin() { }
+80|   // 名字与它的形参一起算作已声明。必须排掉控制流关键字，否则 "if (x) {" 会把 x 误当成形参。
+81|   for (const m of text.matchAll(/(?:^|[;}\
+,])\s*(?:async\s+)?(?:static\s+)?(?:get\s+|set\s+)?([A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*\{/gm)) {
+82|     if (KW.has(m[1])) continue;
+83|     declared.add(m[1]);
+84|     for (const p of m[2].split(",")) {
+85|       const nm = p.trim().split(/[=\s]/)[0].trim().replace("...", "");
+86|       if (/^[A-Za-z_$][\w$]*$/.test(nm)) declared.add(nm);
+87|     }
+88|   }
+89|   // 解构声明：const { spawn } = await import(...) / const [a, b] = ...
+90|   for (const m of text.matchAll(/\b(?:const|let|var)\s*\{([^}]*)\}\s*=/g)) for (const p of m[1].split(",")) { const nm = p.split(":").pop().trim(); if (/^[A-Za-z_$][\w$]*$/.test(nm)) declared.add(nm); }
+91|   for (const m of text.matchAll(/\b(?:const|let|var)\s*\[([^\]]*)\]\s*=/g)) for (const p of m[1].split(",")) { const nm = p.trim().replace(/^.*:/, "").trim(); if (/^[A-Za-z_$][\w$]*$/.test(nm)) declared.add(nm); }
+92|   const props = new Set();
+93|   for (const m of text.matchAll(/\.([A-Za-z_$][\w$]*)/g)) props.add(m[1]);
+94|   for (const m of text.matchAll(/([A-Za-z_$][\w$]*)\s*:/g)) props.add(m[1]);
+95|   const refs = new Map();
+96|   for (const m of text.matchAll(/(^|[^\w$.])([A-Za-z_$][\w$]*)/g)) {
+97|     const nm = m[2];
+98|     if (KW.has(nm) || GLOB.has(nm) || NOISE.has(nm) || declared.has(nm) || props.has(nm)) continue;
+99|     const k = m.index + m[1].length;
+100|     refs.set(nm, (refs.get(nm) || 0) + 1);
+101|   }
+102|   // 单字符名字一律不算：strip 之后残留的单个字母几乎都来自没识别干净的正则/模板，
+103|   // 而它们会把真正的信号淹掉（这个脚本的意义就是"噪声低到能一眼看完"）。
+104|   // 代价是漏掉真的叫 e/i/x 的未声明变量——对"兜底扫描"来说这个取舍是划算的。
+105|   const flags = Array.from(refs.keys()).filter(function (nm) { return nm.length > 1; });
+106|   if (flags.length) { totalFlags += flags.length; console.log("  " + f + ": " + flags.join(", ")); }
+107| }
+108| console.log(totalFlags ? ("共 " + totalFlags + " 处需要人工确认（多数是对象键/方法名噪声）") : "无未声明引用 ✔");

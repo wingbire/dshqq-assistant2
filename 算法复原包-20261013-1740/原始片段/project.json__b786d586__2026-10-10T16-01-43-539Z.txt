@@ -1,0 +1,20 @@
+# 来源会话: dsh-session-b786d586-9deb-4081-a636-5b17c224b31a
+# 记录时间: 2026-10-10T16:01:43.539Z
+# 原始路径名: project.json
+# 提取方式: 文件块(15行)
+# ---------- 以下为逐字内容 ----------
+{
+  "date": "2026-10-10",
+  "title": "群里第 N 个群友是我养的",
+  "targetDurationSec": 210,
+  "createdAt": "2026-10-10T15:56:16.279Z",
+  "steps": {
+    "narration": false,
+    "chat": false,
+    "tts": false,
+    "match": false,
+    "assemble": false
+  },
+  "totalSec": 0,
+  "updatedAt": "2026-10-10T15:56:16.281Z"
+}"}]

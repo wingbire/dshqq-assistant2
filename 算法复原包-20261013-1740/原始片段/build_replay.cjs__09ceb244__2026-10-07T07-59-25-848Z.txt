@@ -1,0 +1,33 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:59:25.848Z
+# 原始路径名: build/replay.cjs
+# 提取方式: 文件块(29行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 用真实群聊记录重放一次判定：看修复后还会不会无条件回复 / 接错对象
+const fs = require('fs');
+const ROOT = 'E:/dshQ群小助手配置端';
+async function main() {
+const gates = await import('file:///E:/dshQ群小助手配置端/src/gates.js');
+const { createStore } = await import('file:///E:/dshQ群小助手配置端/src/store.js');
+const { createAddressee } = await import('file:///E:/dshQ群小助手配置端/src/addressee.js');
+const cfg = JSON.parse(fs.readFileSync(ROOT + '/dsh-data/config/app.json', 'utf8').replace(/^\uFEFF/, ''));
+const fb = JSON.parse(fs.readFileSync(ROOT + '/dsh-data/data/interaction-feedback.json', 'utf8').replace(/^\uFEFF/, ''));
+const evsAll = (fb.groups['255452871'].events || []).slice(-16);
+const store = createStore();
+const G = '255452871';
+const g = store.gatesFor(G, cfg.gates, 1);
+const ad = createAddressee({ weightsFile: ROOT + '/dsh-data/data/addressee-weights.json' });
+const NAMES = {};
+let ni = 0;
+function nameOf(uid) { if (!NAMES[uid]) { ni++; NAMES[uid] = '群友' + ni; } return NAMES[uid]; }
+const st = gates.createGateState(); st.selfId = '3562614549';
+const recent = [];
+let lastBotAt = 0, lastBotText = null, replies = 0;
+console.log('阈值: speakAt=' + g.utilitySpeakAt + ' terseAt=' + g.utilityTerseAt + ' detailedAt=' + g.utilityDetailedAt);
+console.log('');
+console.log('时间    | 说话人   | 消息                                  | 判定                              | 历史反馈');
+console.log('--------|----------|---------------------------------------|-----------------------------------|----------');
+for (const e of evsAll) {
+const uid = String(e.replyTo || 'u0');
+const who = nameOf(uid);
+const people = new Set(recent.filter(function (x) { return !x.self; }).map(function (x) { return x.uid; })).size;

@@ -1,0 +1,31 @@
+# 来源会话: dsh-session-1e1f30ab-1f08-49e8-b075-a86ac6460b77
+# 记录时间: 2026-10-13T06:17:08.116Z
+# 原始路径名: src/kernel.js
+# 提取方式: 文件块(27行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 前置模块 —— 本工作区**唯一**的前置：只提供机制，不含任何业务能力。
+//
+// 【本步只做「接口面显式化」】内部实现仍在各自文件里（paths/config/capabilities/untrusted/store），
+// 这里只做一次再导出 —— 所以**一行行为都没改**，基线指纹必须为 0（实测见 临时/基线/）。
+//
+// 协议对这个文件的六条要求，逐条对上：
+//   ① 路径与环境      → paths 的 APP_ROOT / DATA_ROOT / FEED_DIR / ensureDir
+//   ② 登记表与清单    → capabilities 的 CAPABILITIES / capabilityList / capabilityTable / getByPath
+//                          清单命令：node build/capabilities.mjs [--模块]
+//   ③ 契约文件读写    → store 的 createStore（rules/cache/群档案 等落盘）
+//   ④ 外部文本原语    → untrusted 的 oneLine（群昵称/头衔等外部文本一律过它）
+//   ⑤ 日志与错误上报  → 见 docs：本项目走 createBot 内的 log() 与 ctx.fileLog（闭包面，不在这里）
+//   ⑥ 逃生通道        → 低层原语就是下面这些导出；表达不了时允许直接 import 原文件，
+//                        但要在 模块.json 的「逃生通道」字段里写清（否则算静默降级）
+//
+// 用法：功能模块 import { APP_ROOT, DATA_ROOT } from "./kernel.js";
+// 【写法约定】用「先 import 再 export」而不是 `export ... from` —— 后者会让 build/check.mjs
+//   把再导出的名字误报成「未声明引用」（实测 11 处噪声），而项目的干净标准是 0 处。
+// 注意：**功能模块之间不许互相 import**（协议硬规则②）；违规现状用
+//   node build/kernel-check.mjs 量出来（只报不修）。
+import { APP_ROOT, DATA_ROOT, FEED_DIR, ensureDir } from "./paths.js";
+import { DEFAULT_CONFIG } from "./config.js";
+import { CAPABILITIES, capabilityList, capabilityTable, getByPath } from "./capabilities.js";
+import { oneLine } from "./untrusted.js";
+import { createStore } from "./store.js";
+export { APP_ROOT, DATA_ROOT, FEED_DIR, ensureDir, DEFAULT_CONFIG, CAPABILITIES, capabilityList, capabilityTable, getByPath, oneLine, createStore };

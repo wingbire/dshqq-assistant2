@@ -1,0 +1,363 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:59:11.095Z
+# 原始路径名: src/learner.js
+# 提取方式: 文件块(358行,已去行号)
+# ---------- 以下为逐字内容 ----------
+import fs from "node:fs";
+import path from "node:path";
+import { DATA_ROOT, ensureBaseDirs } from "./paths.js";
+import { DEFAULT_CONFIG, DEFAULT_PERSONA, deepMerge, saveConfig } from "./config.js";
+import { applyBand } from "./profile.js";
+
+// 学习成果的导入 / 导出。
+// 设计原则：
+//  1) 导出格式优先"语言模型能直接吃"的标准形态——OpenAI/DeepSeek 通用的 messages 结构（JSONL）+ 纯文本 system prompt；
+//     同时附带结构化的 meta，方便我们自己的程序再导入（round-trip）。
+//  2) 全局（人设/闸门/规则/评分权重）和 群聊（档案/本群人设/经验/参数/臂）**分开成两个包**，各自独立导入导出。
+//  3) 导入一律过一遍安全过滤：本群参数走 applyBand（白名单+硬边界+比例带），人设/档案/经验限长并清理格式。
+
+export const EXPORT_VERSION = 1;
+export const DEFAULT_EXPORT_DIR = path.join(DATA_ROOT, "exports");
+const MAX_TEXT = 20000;          // 人设/档案上限
+const MAX_LINE = 80;             // 单条经验上限
+const MAX_LINES = 8;             // 经验条数上限
+
+function stamp() {
+const d = new Date();
+const p = (n) => (n < 10 ? "0" + n : "" + n);
+return d.getFullYear() + p(d.getMonth() + 1) + p(d.getDate()) + "-" + p(d.getHours()) + p(d.getMinutes()) + p(d.getSeconds());
+}
+
+function cleanText(s, max) {
+let t = String(s || "").replace(/\
+\
+/g, "\
+").trim();
+if (t.length > max) t = t.slice(0, max);
+return t;
+}
+
+function cleanLines(list) {
+const out = [];
+for (const raw of (Array.isArray(list) ? list : [])) {
+let s = String(raw || "").replace(/\
+?\
+/g, " ").replace(/^[-*·•]\s*/, "").replace(/^\d+[.、)]\s*/, "").trim();
+if (!s) continue;
+if (s.length > MAX_LINE) s = s.slice(0, MAX_LINE);
+out.push(s);
+if (out.length >= MAX_LINES) break;
+}
+return out;
+}
+
+function ensureDir(dir) {
+try { fs.mkdirSync(dir, { recursive: true }); } catch (e) {}
+return dir;
+}
+
+// messages 结构：模型侧的角色只有 system / user / assistant，这里严格按这个来
+function messagesFor(systemText, examples) {
+const msgs = [];
+if (systemText) msgs.push({ role: "system", content: systemText });
+for (const ex of (examples || [])) {
+if (!ex || !ex.user) continue;
+msgs.push({ role: "user", content: String(ex.user).slice(0, 200) });
+msgs.push({ role: "assistant", content: String(ex.assistant || "").slice(0, 200) });
+}
+return msgs;
+}
+
+function writeJsonl(file, rows) {
+const body = rows.map(function (r) { return JSON.stringify(r); }).join("\
+") + "\
+";
+fs.writeFileSync(file, body, "utf8");
+return body.length;
+}
+
+export function createLearner(ctx) {
+const store = ctx.store;
+const feedback = ctx.feedback;
+const bandit = ctx.bandit;
+
+function outDir(dir) {
+const d = String(dir || ctx.config.exportDir || DEFAULT_EXPORT_DIR);
+return ensureDir(d);
+}
+
+// ---------------- 全局 ----------------
+function buildGlobalBundle() {
+const cfg = ctx.config || {};
+const gates = JSON.parse(JSON.stringify(cfg.gates || {}));
+const rules = store && store.rules ? JSON.parse(JSON.stringify(store.rules)) : null;
+return {
+meta: {
+kind: "dsh-qq-global-knowledge",
+version: EXPORT_VERSION,
+format: "openai-messages+meta",
+exportedAt: new Date().toISOString(),
+sourceModel: (cfg.brain && cfg.brain.model) || "",
+agent: "DSH-QQ 群小助手",
+portable: ["persona", "rules", "gates"],
+modelBound: ["gates.tokenCostPenalty", "gates.scoreAlpha", "gates.scoreBeta"],
+usage: {
+systemPrompt: "把 systemPrompt.text 作为一个 system 消息注入即可；messages 数组可直接喂给任何兼容 OpenAI/DeepSeek 的接口",
+finetune: "messages / messages.jsonl 是标准的对话微调格式（每条样本一个 messages 数组）"
+}
+},
+systemPrompt: { role: "system", content: cfg.persona && cfg.persona.global ? cfg.persona.global : "" },
+messages: [{ role: "system", content: cfg.persona && cfg.persona.global ? cfg.persona.global : "" }],
+config: {
+persona: {
+global: cleanText(cfg.persona && cfg.persona.global, MAX_TEXT),
+temporary: cleanText(cfg.persona && cfg.persona.temporary, 2000),
+byGroup: (cfg.persona && cfg.persona.byGroup) || {}
+},
+gates: gates,
+rules: rules
+}
+};
+}
+
+function exportGlobal(opts) {
+const dir = outDir(opts && opts.dir);
+const bundle = buildGlobalBundle();
+const base = "global-" + stamp();
+const jsonFile = path.join(dir, base + ".json");
+const txtFile = path.join(dir, base + "-system-prompt.txt");
+const jsonlFile = path.join(dir, base + "-messages.jsonl");
+fs.writeFileSync(jsonFile, JSON.stringify(bundle, null, 2), "utf8");
+fs.writeFileSync(txtFile, bundle.systemPrompt.content || "", "utf8");
+writeJsonl(jsonlFile, bundle.messages);
+return { ok: true, kind: "global", dir: dir, files: [jsonFile, txtFile, jsonlFile], bytes: fs.statSync(jsonFile).size, personaChars: (bundle.systemPrompt.content || "").length };
+}
+
+function importGlobal(file) {
+const raw = fs.readFileSync(String(file), "utf8");
+let obj = null;
+try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+let persona = "";
+let patch = null;
+if (obj && obj.config) {
+// 我们自己的导出包：可 round-trip
+patch = obj.config;
+persona = (obj.config.persona && obj.config.persona.global) || (obj.systemPrompt && obj.systemPrompt.content) || "";
+} else if (obj && (obj.messages || obj.systemPrompt)) {
+// 通用 messages 包
+const sys = (obj.messages || []).filter(function (m) { return m && m.role === "system"; }).map(function (m) { return m.content; }).join("\
+\
+");
+persona = sys || (obj.systemPrompt && obj.systemPrompt.content) || "";
+} else {
+// 纯文本：整份当人设
+persona = raw;
+}
+persona = cleanText(persona, MAX_TEXT);
+if (!persona) return { ok: false, error: "文件里没有可用的 system / 人设文本" };
+const next = { persona: { global: persona } };
+if (patch && patch.persona && typeof patch.persona.temporary === "string") next.persona.temporary = cleanText(patch.persona.temporary, 2000);
+if (patch && patch.gates && typeof patch.gates === "object") next.gates = patch.gates;
+if (patch && patch.rules && typeof patch.rules === "object" && store && store.updateRules) {
+try { store.updateRules(patch.rules); } catch (e) {}
+}
+ctx.updateConfig(next);
+return { ok: true, personaChars: persona.length, appliedGates: !!(patch && patch.gates), appliedRules: !!(patch && patch.rules) };
+}
+
+// ---------------- 群聊 ----------------
+function buildGroupBundle(gid) {
+const g = String(gid);
+const prof = (store && store.loadGroupProfile) ? (store.loadGroupProfile(g) || null) : null;
+const known = (store && store.knownGroups) ? store.knownGroups(true).filter(function (x) { return x.groupId === g; })[0] : null;
+const globalPersona = (ctx.config.persona && ctx.config.persona.global) || "";
+const personaText = prof && prof.personaText ? String(prof.personaText) : "";
+const lines = (prof && Array.isArray(prof.lines)) ? prof.lines : [];
+const profileText = prof && prof.text ? String(prof.text) : "";
+// 面向模型的 system 文本：全局人设 + 本群人设补充 + 经验教训 + 群档案
+const blocks = [];
+if (globalPersona) blocks.push(globalPersona);
+if (personaText) blocks.push("【本群人设补充】\
+" + personaText);
+if (lines.length) blocks.push("【经验教训（自己复盘学到的，照着做）】\
+- " + lines.join("\
+- "));
+if (profileText) blocks.push("【群档案】\
+" + profileText);
+const systemText = blocks.join("\
+\
+");
+
+// 少样本示例：优先用"有提问原文 + 被接住"的成对样本，其次只有回复文本
+const examples = [];
+try {
+if (feedback && feedback.pairs) {
+for (const ex of (feedback.pairs(g, 6) || [])) if (ex && ex.user && ex.assistant) examples.push(ex);
+}
+if (feedback && feedback.examples) {
+for (const ex of (feedback.examples(g, 6) || [])) {
+if (ex && ex.text && examples.length < 8) examples.push({ user: "", assistant: ex.text, score: ex.delta });
+}
+}
+} catch (e) {}
+// 臂的后验：一起带走（作为新模型上的先验）
+let arms = null;
+try { arms = bandit ? bandit.summary() : null; } catch (e) { arms = null; }
+
+const bundle = {
+meta: {
+kind: "dsh-qq-group-knowledge",
+version: EXPORT_VERSION,
+format: "openai-messages+meta",
+exportedAt: new Date().toISOString(),
+groupId: g,
+groupName: (known && known.name) || null,
+sourceModel: (ctx.config.brain && ctx.config.brain.model) || "",
+rounds: (prof && prof.rounds) || 0,
+portable: ["profileText", "personaText", "lines", "params", "examples"],
+modelBound: ["params", "arms"]
+},
+systemPrompt: { role: "system", content: systemText },
+messages: messagesFor(systemText, examples.filter(function (e) { return e.user; })),
+group: {
+profileText: cleanText(profileText, MAX_TEXT),
+personaText: cleanText(personaText, 4000),
+lines: cleanLines(lines),
+params: (prof && prof.params) || {},
+updatedAt: (prof && prof.updatedAt) || 0,
+rounds: (prof && prof.rounds) || 0
+},
+examples: examples,
+arms: arms
+};
+return bundle;
+}
+
+function exportGroup(gid, opts) {
+const g = String(gid);
+if (!g) return { ok: false, error: "缺少群号" };
+const dir = outDir(opts && opts.dir);
+const bundle = buildGroupBundle(g);
+const base = "group-" + g + "-" + stamp();
+const jsonFile = path.join(dir, base + ".json");
+const txtFile = path.join(dir, base + "-system-prompt.txt");
+const jsonlFile = path.join(dir, base + "-messages.jsonl");
+fs.writeFileSync(jsonFile, JSON.stringify(bundle, null, 2), "utf8");
+fs.writeFileSync(txtFile, bundle.systemPrompt.content || "", "utf8");
+// 微调样本：标准 messages 结构（system + user + assistant）
+const sysMsg = { role: "system", content: bundle.systemPrompt.content };
+const rows = [];
+// 有提问原文的成对样本 → 完整三轮
+for (const ex of (bundle.examples || [])) {
+if (!ex || !ex.user) continue;
+rows.push({ messages: [sysMsg, { role: "user", content: ex.user }, { role: "assistant", content: ex.assistant }] });
+}
+// 只有回复文本的 → 人工补 user 后即可用
+if (!rows.length) {
+rows.push({ messages: [sysMsg] });
+for (const ex of (bundle.messages || [])) {
+if (ex.role === "assistant") rows.push({ messages: [sysMsg, { role: "assistant", content: ex.content }] });
+}
+}
+writeJsonl(jsonlFile, rows);
+return {
+ok: true, kind: "group", groupId: g, dir: dir,
+files: [jsonFile, txtFile, jsonlFile],
+bytes: fs.statSync(jsonFile).size,
+profileChars: (bundle.group.profileText || "").length,
+lines: (bundle.group.lines || []).length,
+examples: (bundle.examples || []).length
+};
+}
+
+function importGroup(file, gidOverride) {
+const raw = fs.readFileSync(String(file), "utf8");
+let obj = null;
+try { obj = JSON.parse(raw); } catch (e) { obj = null; }
+let gid = String(gidOverride || "").trim();
+let profileText = "", personaText = "", lines = [], params = {};
+// 从 system 文本里按小节切分（也用于"本群还没档案"的导出包）
+function fromSystemText(text) {
+const s = String(text || "");
+const cut = function (head) {
+const i = s.indexOf(head);
+if (i < 0) return "";
+const rest = s.slice(i + head.length);
+const j = rest.indexOf("\
+【");                       // 到下一个小节为止
+return (j >= 0 ? rest.slice(0, j) : rest).trim();
+};
+const personaPart = cut("【本群人设补充】");
+const linesPart = cut("【经验教训（自己复盘学到的，照着做）】") || cut("【经验教训】");
+const prof = cut("【群档案】");
+const out = { profileText: cleanText(prof, MAX_TEXT), personaText: cleanText(personaPart, 4000), lines: linesPart ? cleanLines(linesPart.split("\
+")) : [] };
+// 没有人设小节时：把【群档案】之前的内容（通常是全局人设 + 群补充）当人设
+if (!out.personaText && !out.lines.length) {
+const ai = s.indexOf("【群档案】");
+out.personaText = cleanText(ai > 0 ? s.slice(0, ai).trim() : s, 4000);
+} else if (out.profileText && !out.personaText) {
+const ai = s.indexOf("【群档案】");
+if (ai > 0) out.personaText = cleanText(s.slice(0, ai).trim(), 4000);
+}
+return out;
+}
+if (obj && obj.group) {
+gid = gid || String((obj.meta && obj.meta.groupId) || "");
+profileText = cleanText(obj.group.profileText, MAX_TEXT);
+personaText = cleanText(obj.group.personaText, 4000);
+lines = cleanLines(obj.group.lines);
+params = obj.group.params || {};
+// 本群还没有档案/人设时（group 字段为空），退回 system 文本
+if (!profileText && !personaText && !lines.length) {
+const sys = (obj.messages || []).filter(function (m) { return m && m.role === "system"; }).map(function (m) { return m.content; }).join("\
+\
+") || (obj.systemPrompt && obj.systemPrompt.content) || "";
+const got = fromSystemText(sys);
+profileText = got.profileText; personaText = got.personaText; lines = got.lines;
+}
+} else if (obj && (obj.messages || obj.systemPrompt)) {
+gid = gid || String((obj.meta && obj.meta.groupId) || "");
+const sys = (obj.messages || []).filter(function (m) { return m && m.role === "system"; }).map(function (m) { return m.content; }).join("\
+\
+") || (obj.systemPrompt && obj.systemPrompt.content) || "";
+const got = fromSystemText(sys);
+profileText = got.profileText; personaText = got.personaText; lines = got.lines;
+} else {
+profileText = cleanText(raw, MAX_TEXT);
+}
+if (!gid) return { ok: false, error: "文件里没有群号，请在导入时手动指定" };
+if (!profileText && !personaText && !lines.length) return { ok: false, error: "文件里没有可导入的档案/人设/经验" };
+
+// 参数过安全带：白名单 + 硬边界 + 相对全局值的比例带
+const safeParams = applyBand(params, ctx.config.gates || {}, 1);
+const prev = (store.loadGroupProfile(gid) || {});
+const next = {
+updatedAt: Date.now(),
+text: profileText || prev.text || "",
+personaText: personaText || prev.personaText || "",
+lines: lines.length ? lines : (prev.lines || []),
+params: safeParams,
+paramsUpdatedAt: Date.now(),
+rounds: Number(prev.rounds || 0) + 1,
+importedAt: Date.now()
+};
+store.saveGroupProfile(gid, next);
+// 让人设/参数立刻生效
+try { if (ctx.resetSession) ctx.resetSession(gid); } catch (e) {}
+return { ok: true, groupId: gid, profileChars: next.text.length, personaChars: next.personaText.length, lines: next.lines.length, params: safeParams };
+}
+
+// 给 GUI 用：导出目录（找不到就建）
+function exportDirInfo() { return { dir: outDir(null) }; }
+
+return {
+exportGlobal: exportGlobal,
+importGlobal: importGlobal,
+exportGroup: exportGroup,
+importGroup: importGroup,
+buildGlobalBundle: buildGlobalBundle,
+buildGroupBundle: buildGroupBundle,
+exportDirInfo: exportDirInfo
+};
+}"}]

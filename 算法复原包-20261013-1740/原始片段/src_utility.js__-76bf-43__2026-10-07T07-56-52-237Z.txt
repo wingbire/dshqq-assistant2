@@ -1,0 +1,148 @@
+# 来源会话: dsh-968be984-76bf-43b6-9c7c-30cad1a77e20
+# 记录时间: 2026-10-07T07:56:52.237Z
+# 原始路径名: src/utility.js
+# 提取方式: 文件块(143行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 统一判定效用（utility）：把六个因素合成一个分数，再由分数决定
+//   · 要不要回复（U 低于阈值 → 不开口）
+//   · 回复深度（极短 / 常规 / 多讲两句）
+//
+// 六个因素分两层：
+//   收益层（越高越值得说）：
+//     ① 对象判断 p_say     —— 这句话是不是在对我说（addressee 置信度）
+//     ② 语义理解 v_sem     —— 和我上一条/当前话题的语义相关度 + 是否带来新信息
+//     ③ 对话延续 v_cont    —— 我在这轮对话里的位置（被直接回复 / 刚说完 / 群里在聊我的话题 / 全新话题）
+//     ④ 需求判定 v_demand  —— 这句话要不要人回应（demandScore 归一化）
+//   成本层（越高越不该说）：
+//     ⑤ 回复难度 d_diff    —— 问题类型 + 是否要长内容 + 这类问题历史上的输出规模（外部可观测量，不让模型自报）
+//     ⑥ 预估 token d_cost  —— 未命中输入 + 2×输出（与计费口径一致），再用成本量纲归一
+//
+//   U = (w1·p_say + w2·v_sem + w3·v_cont + w4·v_demand) − λ_eff · (d_diff · d_cost / costScale)
+//
+// 权重与阈值都可以被「群档案 + 自学习」调整（见 profile.js 的 PARAM_BOUNDS）。
+// 设计取舍：
+//   · 保留硬触发地板：@我 / 回复我 / 叫外号 命中时，U 再低也至少给一句短的（不能出现"被点名也不回"）
+//   · 成本用"奖励单位"折算（λ_eff），这样"说不说"和"值不值这个钱"是同一把尺子
+//   · d_diff 只用外部可观测量估计，避免模型为了少干活而虚报难度
+
+export const UTILITY_WEIGHTS = { w1: 0.40, w2: 0.20, w3: 0.25, w4: 0.15, lambda: 0.5, gateLow: 0.15, gateHigh: 0.5 };
+// 阈值：低于 speak 不开口；speak~terseAt 极短；terseAt~detailedAt 常规；高于 detailedAt 多讲两句
+export const UTILITY_THRESHOLDS = { speak: 0.20, terseAt: 0.35, detailedAt: 0.65 };
+
+// 成本量纲：一条普通互动的计费 token（和 score.js 的 costScale 默认一致）
+const DEFAULT_COST_SCALE = 3000;
+
+function num(v, dv) {
+const x = Number(v);
+return Number.isFinite(x) ? x : dv;
+}
+function clamp01(x) {
+if (!Number.isFinite(x)) return 0;
+if (x < 0) return 0;
+if (x > 1) return 1;
+return x;
+}
+
+// 话题热度分（gates.autoJoinScore 的产物）→ 0~1
+export function normalizeHeat(heat) {
+return clamp01(num(heat, 0) / 5);
+}
+
+// 需求分（demandScore.score，范围大致 -2~4）→ 0~1
+export function normalizeDemand(demand) {
+return clamp01((num(demand, 0) + 1) / 5);
+}
+
+// 回复难度：只用外部可观测量
+//   longReq   —— 对方在要长内容（写作文/代码/论文）
+//   hasImage  —— 带图（要多看一层）
+//   hotTopic  —— 涉及数值/机制类问题（通常要查证）
+//   histOut   —— 这类问题历史上我的平均输出 token（可选）
+export function estimateDifficulty(opts) {
+const o = opts || {};
+let d = 0.25;
+if (o.longReq) d += 0.5;
+if (o.hasImage) d += 0.1;
+if (o.numeric) d += 0.15;
+const hist = num(o.histOutputTokens, 0);
+if (hist > 0) d += Math.min(0.3, hist / 1200 * 0.3);   // 历史上这类问题输出越长，难度越高
+return Math.min(1.2, Math.max(0.1, d));
+}
+
+// 预估 token：未命中输入 + 2×输出（和计费口径一致）
+export function estimateTokens(opts) {
+const o = opts || {};
+const input = num(o.estInputTokens, 1200);
+const output = num(o.estOutputTokens, 120);
+return Math.max(200, input + 2 * output);
+}
+
+// 主函数：算出 U 与六个分项
+export function utilityScore(input) {
+const i = input || {};
+const W = Object.assign({}, UTILITY_WEIGHTS, i.weights || {});
+const TH = Object.assign({}, UTILITY_THRESHOLDS, i.thresholds || {});
+const pSay = clamp01(num(i.pSay, 0));
+
+const heat = num(i.heat, 0);
+const sem = num(i.semantic, i.heat === undefined ? 0 : normalizeHeat(heat));
+const cont = clamp01(num(i.continuation, 0));
+// 优先用外部归一化好的 demandNorm（0~1）；只有给了原始分才按 /4 归一
+const demand = (i.demandNorm !== undefined && i.demandNorm !== null)
+? clamp01(num(i.demandNorm, 0))
+ clamp01(num(i.demand, 0) / 4);
+
+const dDiff = estimateDifficulty({
+longReq: i.longReq, hasImage: i.hasImage, numeric: i.numeric, histOutputTokens: i.histOutputTokens
+});
+const dCost = estimateTokens({ estInputTokens: i.estInputTokens, estOutputTokens: i.estOutputTokens });
+const costScale = num(i.costScale, DEFAULT_COST_SCALE) || DEFAULT_COST_SCALE;
+
+// 参与收益：这个群过去接不接我（0.7~1.6）。越接得住，同一句话越值得说。
+const eng = Math.min(2, Math.max(0.3, num(i.engagement, 1)));
+// 【关键】对象判断是"闸门"而不是并列项：
+//   如果不是在对我说，那么这句话"有没有提问/值不值得回应/我是不是刚说完"都不该算成我的收益。
+//   gate 在 p_say = gateLow 时为 0，到 gateHigh 时为 1。
+const gate = clamp01((pSay - num(W.gateLow, 0.15)) / Math.max(1e-6, (num(W.gateHigh, 0.5) - num(W.gateLow, 0.15))));
+const benefit = (W.w1 * pSay + gate * (W.w2 * clamp01(sem) + W.w3 * cont + W.w4 * clamp01(demand))) * eng;
+const cost = num(W.lambda, 0.5) * dDiff * (dCost / costScale);
+const U = benefit - cost;
+
+// 分档：低于开口阈值 → skip；否则按 U 给 terse / standard / detailed
+let action = "skip";
+if (U >= num(TH.detailedAt, 0.45)) action = "detailed";
+else if (U >= num(TH.terseAt, 0.26)) action = "standard";
+else if (U >= num(TH.speak, 0.10)) action = "terse";
+
+const factors = {
+engagement: Math.round(eng * 100) / 100,
+p_say: Math.round(pSay * 1000) / 1000,
+gate: Math.round(gate * 1000) / 1000,
+v_sem: Math.round(clamp01(sem) * 1000) / 1000,
+v_cont: Math.round(cont * 1000) / 1000,
+v_demand: Math.round(clamp01(demand) * 1000) / 1000,
+d_diff: Math.round(dDiff * 1000) / 1000,
+d_cost: Math.round(dCost)
+};
+return {
+U: Math.round(U * 1000) / 1000,
+benefit: Math.round(benefit * 1000) / 1000,
+cost: Math.round(cost * 1000) / 1000,
+action: action,
+factors: factors,
+weights: { w1: W.w1, w2: W.w2, w3: W.w3, w4: W.w4, lambda: W.lambda },
+thresholds: { speak: TH.speak, terseAt: TH.terseAt, detailedAt: TH.detailedAt }
+};
+}
+
+// 按档给出回复长度上限与提示词约束（与话风臂的 ARM_POLICY 对齐）
+export const ACTION_POLICY = {
+skip:     { cap: 0,   label: "不开口" },
+terse:    { cap: 14,  label: "极短接话" },
+standard: { cap: 50,  label: "常规闲聊" },
+detailed: { cap: 140, label: "多讲两句" }
+};
+
+export function policyForAction(action) {
+return ACTION_POLICY[action] || ACTION_POLICY.standard;
+}

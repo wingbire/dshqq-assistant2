@@ -1,0 +1,11 @@
+# 来源会话: dsh-session-561acaef-e396-40aa-ae95-b0c411ef8346
+# 记录时间: 2026-10-09T13:23:08.653Z
+# 原始路径名: actions.js
+# 提取方式: 文件块(6行,已去行号)
+# ---------- 以下为逐字内容 ----------
+ async function run(action, meta) {
+ detail: action.kind === "reply" || action.kind === "warn" ? String(action.text || "") : (action.seconds ? action.seconds + "s" : "
+ await client.call("send_group_msg", { group_id: gid, message: action.text || DEFAULT_WARN_TEXT });
+ } else if (action.kind === "reply") {
+ await client.call("send_group_msg", { group_id: gid, message: action.text || "" });
+File sandbox enforcement is partial on this host."}]

@@ -1,0 +1,135 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T13:48:21.941Z
+# 原始路径名: build/package.ps1
+# 提取方式: 文件块(130行)
+# ---------- 以下为逐字内容 ----------
+1| param(
+2|   [string]$OutDir = "",
+3|   [string]$NodeExe = ""
+4| )
+5| $ErrorActionPreference = "Stop"
+6| $root = Split-Path -Parent $PSScriptRoot
+7| if (-not $OutDir) { $OutDir = Join-Path $root "dist" }
+8| 
+9| if (-not $NodeExe) {
+10|   # 先看 PATH（最可靠），再看常见安装位置，最后用上一次解压出来的运行时
+11|   $cands = @()
+12|   $cmd = Get-Command node -ErrorAction SilentlyContinue
+13|   if ($cmd) { $cands += $cmd.Source }
+14|   $cands += @("D:\
+odejs\
+ode.exe",
+15|               "C:\Program Files\
+odejs\
+ode.exe",
+16|               (Join-Path $env:LOCALAPPDATA "Programs\
+odejs\
+ode.exe"),
+17|               (Join-Path $root "dsh-data\
+untime\
+ode.exe"))
+18|   foreach ($c in $cands) { if ($c -and (Test-Path $c)) { $NodeExe = $c; break } }
+19| }
+20| if (-not $NodeExe -or -not (Test-Path $NodeExe)) { throw "找不到 node.exe，请用 -NodeExe 指定" }
+21| 
+22| $pkg = Get-Content (Join-Path $root "package.json") -Raw | ConvertFrom-Json
+23| $version = $pkg.version + "+" + (Get-Date -Format "yyyyMMddHHmmss")
+24| Write-Host ("打包版本: " + $version)
+25| Write-Host ("内嵌 node: " + $NodeExe + "  (" + [Math]::Round((Get-Item $NodeExe).Length/1MB,1) + " MB)")
+26| 
+27| # 1) staging
+28| $stage = Join-Path $root "build\stage"
+29| if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
+30| New-Item -ItemType Directory -Force -Path $stage | Out-Null
+31| Copy-Item (Join-Path $root "src") $stage -Recurse
+32| Copy-Item (Join-Path $root "public") $stage -Recurse
+33| Copy-Item (Join-Path $root "package.json") $stage
+34| 
+35| # 2) zip payload (no base directory)
+36| $zip = Join-Path $root "build\payload.zip"
+37| if (Test-Path $zip) { Remove-Item $zip -Force }
+38| try { Add-Type -AssemblyName System.IO.Compression.FileSystem } catch {}
+39| [System.IO.Compression.ZipFile]::CreateFromDirectory($stage, $zip, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+40| Write-Host ("payload.zip: " + [Math]::Round((Get-Item $zip).Length/1KB,1) + " KB")
+41| 
+42| # 3) version stamp
+43| $verFile = Join-Path $root "build\version.txt"
+44| [System.IO.File]::WriteAllText($verFile, $version, [System.Text.Encoding]::ASCII)
+45| 
+46| # 3.5) 应用图标
+47| $ico = Join-Path $root "build\appicon.ico"
+48| try { & (Join-Path $PSScriptRoot "make-icon.ps1") | Out-Null } catch { Write-Host ("图标生成失败: " + $_.Exception.Message) }
+49| $hasIcon = Test-Path $ico
+50| 
+51| # 3.6) 内置 NapCat（用于一键修复注入）
+52| $napcatSrc = Join-Path $root "napcat-onekey\NapCat.Shell.zip"
+53| $hasNapcat = Test-Path $napcatSrc
+54| if ($hasNapcat) { Write-Host ("内置 NapCat: " + [Math]::Round((Get-Item $napcatSrc).Length/1MB,1) + " MB") }
+55| else { Write-Host "提示：未找到 NapCat.Shell.zip，本次不内置（一键修复注入将不可用）" }
+56| 
+57| # 4) 编译单文件 exe
+58| New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
+59| $exe = Join-Path $OutDir "DSH-QQ小助手.exe"
+60| $csc = Join-Path $env:SystemRoot "Microsoft.NET\Framework64\v4.0.30319\csc.exe"
+61| if (-not (Test-Path $csc)) { $csc = Join-Path $env:SystemRoot "Microsoft.NET\Framework\v4.0.30319\csc.exe" }
+62| if (-not (Test-Path $csc)) { throw "找不到 csc.exe" }
+63| 
+64| # 4.1) 内置 WebView2（官方 NuGet 包 Microsooft.Web.WebView2 取出的托管程序集 + 原生加载器）
+65| $wvDir = Join-Path $root "launcher\webview2"
+66| foreach ($need in @("Microsoft.Web.WebView2.Core.dll","Microsoft.Web.WebView2.WinForms.dll","WebView2Loader.x64.dll","WebView2Loader.x86.dll")) {
+67|   if (-not (Test-Path (Join-Path $wvDir $need))) {
+68|     throw ("缺少 launcher\webview2\" + $need + " —— 请先按 README「内置面板（WebView2）」一节取一次官方 NuGet 包")
+69|   }
+70| }
+71| $wvCore = Join-Path $wvDir "Microsoft.Web.WebView2.Core.dll"
+72| $wvWin  = Join-Path $wvDir "Microsoft.Web.WebView2.WinForms.dll"
+73| $wvX64  = Join-Path $wvDir "WebView2Loader.x64.dll"
+74| $wvX86  = Join-Path $wvDir "WebView2Loader.x86.dll"
+75| $wvLic  = Join-Path $wvDir "LICENSE.txt"
+76| $wvNote = Join-Path $wvDir "NOTICE.txt"
+77| Write-Host ("内置 WebView2 SDK: " + (Get-Content (Join-Path $wvDir "VERSION.txt") -Raw).Trim())
+78| 
+79| $cscArgs = @(
+80|   "/nologo",
+81|   "/target:winexe",
+82|   "/out:$exe",
+83|   "/r:System.Windows.Forms.dll",
+84|   "/r:System.Drawing.dll",
+85|   "/r:System.IO.Compression.dll",
+86|   "/r:System.IO.Compression.FileSystem.dll",
+87|   "/r:System.Web.Extensions.dll",
+88|   "/r:$wvCore",
+89|   "/r:$wvWin",
+90|   "/resource:$zip,payload.zip",
+91|   "/resource:$NodeExe,node.exe",
+92|   "/resource:$verFile,version.txt",
+93|   "/resource:$wvCore,Microsoft.Web.WebView2.Core.dll",
+94|   "/resource:$wvWin,Microsoft.Web.WebView2.WinForms.dll",
+95|   "/resource:$wvX64,WebView2Loader.x64.dll",
+96|   "/resource:$wvX86,WebView2Loader.x86.dll",
+97|   "/resource:$wvLic,webview2-LICENSE.txt",
+98|   "/resource:$wvNote,webview2-NOTICE.txt",
+99|   (Join-Path $root "launcher\Api.cs"),
+100|   (Join-Path $root "launcher\PanelForm.cs"),
+101|   (Join-Path $root "launcher\MainForm.cs"),
+102|   (Join-Path $root "launcher\TrayLauncher.cs")
+103| )
+104| if ($hasIcon) {
+105|   $cscArgs += "/win32icon:$ico"
+106|   $cscArgs += "/resource:$ico,appicon.ico"
+107| }
+108| if ($hasNapcat) { $cscArgs += "/resource:$napcatSrc,napcat.zip" }
+109| if (Test-Path $exe) { Remove-Item $exe -Force }
+110| & $csc @cscArgs
+111| 
+112| if ($LASTEXITCODE -ne 0) { throw ("csc 编译失败，退出码 " + $LASTEXITCODE) }
+113| if (-not (Test-Path $exe)) { throw "编译失败：没有生成 exe" }
+114| $mb = [Math]::Round((Get-Item $exe).Length/1MB,1)
+115| 
+116| Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+117| Remove-Item $zip -Force -ErrorAction SilentlyContinue
+118| Remove-Item $verFile -Force -ErrorAction SilentlyContinue
+119| Remove-Item $ico -Force -ErrorAction SilentlyContinue
+120| 
+121| Write-Host ("完成: " + $exe + "  (" + $mb + " MB)")
+File sandbox enforcement is partial on this host."}]

@@ -1,0 +1,21 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T17:22:57.597Z
+# 原始路径名: paths.js
+# 提取方式: 文件块(17行)
+# ---------- 以下为逐字内容 ----------
+  export const APP_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  // - 开发运行时：APP_ROOT 就是仓库根目录，落到 <仓库根>\dsh-data
+  // - 兜底：万一 APP_ROOT 就是数据目录本身（<数据目录>\app），直接返回它
+  const override = process.env.DSHQQ_DATA_DIR;
+  if (path.basename(APP_ROOT).toLowerCase() === "app") return path.resolve(path.dirname(APP_ROOT));
+  return path.resolve(path.join(APP_ROOT, "dsh-data"));
+  export const DATA_ROOT = resolveDataRoot();
+  export const CONFIG_DIR = path.join(DATA_ROOT, "config");
+  export const DSH_HOME = path.join(DATA_ROOT, "dsh-home");
+  export const PERSONA_DIR = path.join(DATA_ROOT, "persona");
+  export const GROUPS_DIR = path.join(DATA_ROOT, "data", "groups");
+  export const LOG_DIR = path.join(DATA_ROOT, "logs");
+  export const FEED_DIR = path.join(DATA_ROOT, "feed");
+  export const BALANCE_CACHE_FILE = path.join(DATA_ROOT, "data", "balance.json");
+  export const BROWSER_PROFILE_DIR = path.join(DATA_ROOT, "browser-profile");
+  [DATA_ROOT, CONFIG_DIR, DSH_HOME, PERSONA_DIR, GROUPS_DIR, LOG_DIR, FEED_DIR].forEach(ensureDir);

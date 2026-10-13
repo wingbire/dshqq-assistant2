@@ -1,0 +1,18 @@
+# 来源会话: dsh-session-9526d43e-fc0a-49d3-be09-06f41962c227
+# 记录时间: 2026-10-08T12:53:25.302Z
+# 原始路径名: package.json
+# 提取方式: 文件块(14行)
+# ---------- 以下为逐字内容 ----------
+{
+  "name": "dsh-profile-qq",
+  "private": true,
+  "dependencies": {},
+  "dsh": {
+    "profile": {
+      "bundles": [
+        "@deepseek-ai/dsh-base",
+        "@deepseek-ai/dsh-headless"
+      ]
+    }
+  }
+}

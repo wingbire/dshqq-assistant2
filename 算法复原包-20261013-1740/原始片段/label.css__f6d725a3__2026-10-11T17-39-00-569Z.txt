@@ -1,0 +1,51 @@
+# 来源会话: dsh-session-f6d725a3-f6dd-407e-bba8-b189127a0c85
+# 记录时间: 2026-10-11T17:39:00.569Z
+# 原始路径名: label.css
+# 提取方式: 文件块(47行)
+# ---------- 以下为逐字内容 ----------
+(total 73)
+1| /* 人工标注页样式（自包含，不依赖面板的 style.css，避免面板改版时被连带影响） */
+2| :root{
+3|   --deep-800:#0B2C57; --deep-700:#123C73;
+4|   --blue-500:#2E6FD6; --sky-50:#F2F7FD; --sky-100:#E8F1FB;
+5|   --ink-900:#0F2544; --ink-700:#2B4A73; --ink-500:#5B7797; --ink-400:#8497AE;
+6|   --line:#DCE7F3;
+7|   --ok:#12855A; --ok-bg:#E6F6EF; --warn:#B26A00; --warn-bg:#FDF3E2; --err:#C2352E; --err-bg:#FDECEA;
+8|   --r-md:12px; --r-lg:16px; --r-pill:999px;
+9|   --font:"MiSans","Microsoft YaHei UI","Microsoft YaHei","Noto Sans SC",system-ui,-apple-system,"Segoe UI",sans-serif;
+10| }
+11| *{box-sizing:border-box}
+12| body{margin:0;background:var(--sky-50);color:var(--ink-900);font:14px/1.62 var(--font)}
+13| .bar{
+14|   position:sticky;top:0;z-index:5;display:flex;gap:12px;align-items:center;flex-wrap:wrap;
+15|   padding:12px 20px;background:#fff;border-bottom:1px solid var(--line);
+16| }
+17| .bar .brand{font-weight:700;color:var(--deep-800);font-size:15px}
+18| .stats{font-size:12.5px;color:var(--ink-500);flex:1 1 320px;min-width:220px}
+19| .tools{display:flex;gap:8px;align-items:center;margin-left:auto}
+20| select{
+21|   font:inherit;font-size:12.5px;color:var(--deep-800);padding:5px 9px;
+22|   border:1px solid var(--line);border-radius:8px;background:#fff;
+23| }
+24| .btn{
+25|   font:inherit;font-size:13px;font-weight:600;color:var(--deep-800);background:#fff;
+26|   border:1px solid var(--line);border-radius:10px;padding:8px 14px;cursor:pointer;
+27|   transition:background .16s,border-color .16s,transform .06s;
+28| }
+29| .btn:hover{background:var(--sky-100);border-color:#BFD6EE}
+30| .btn:active{transform:translateY(1px)}
+31| .btn.primary{color:#fff;background:linear-gradient(135deg,#123C73,#2E6FD6);border-color:transparent}
+32| .btn.danger{color:#fff;background:linear-gradient(135deg,#8E2A25,#C2352E);border-color:transparent}
+33| .btn.join{color:#fff;background:linear-gradient(135deg,#1C6B57,#269B78);border-color:transparent}
+34| .panel{max-width:900px;margin:22px auto 60px;padding:0 16px}
+35| .weights{max-width:900px;margin:8px auto 0;padding:0 16px;font-size:12px;color:var(--ink-400)}
+36| .train-result{max-width:900px;margin:10px auto 0;padding:0 16px}
+37| .train-result .box{background:#fff;border:1px solid var(--line);border-radius:var(--r-md);padding:10px 14px;font-size:12.5px;color:var(--ink-700);line-height:1.7;white-space:pre-wrap}
+38| .train-result .box.ok{border-color:transparent;background:var(--ok-bg);color:var(--ok)}
+39| .train-result .box.warn{border-color:transparent;background:var(--warn-bg);color:var(--warn)}
+40| .train-result .box.err{border-color:transparent;background:var(--err-bg);color:var(--err)}
+41| .card{background:#fff;border:1px solid var(--line);border-radius:var(--r-lg);
+42|   box-shadow:0 12px 28px -20px rgba(11,44,87,.45);padding:20px 22px;margin-bottom:16px}
+43| .prog{display:flex;gap:14px;flex-wrap:wrap;font-size:12.5px;color:var(--ink-500);margin:0 0 10px}
+44| .prog-n{font-weight:700;color:var(--blue-500)}
+45| .who{display:flex;gap:10px;align-items:baseli

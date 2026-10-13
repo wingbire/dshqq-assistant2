@@ -1,0 +1,59 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T13:48:21.941Z
+# 原始路径名: build/audit-final.cjs
+# 提取方式: 文件块(55行)
+# ---------- 以下为逐字内容 ----------
+1| // 回复判定回归矩阵（对齐六因子效用 + 对象闸门 + 统一阈值）
+2| const fs = require('fs');
+3| const path = require('path');
+4| const { pathToFileURL } = require('url');
+5| const ROOT = path.resolve(__dirname, '..');
+6| const SRC = pathToFileURL(path.join(ROOT, 'src') + path.sep).href;   // file:///.../src/
+7| async function main() {
+8|   const gates = await import(SRC + 'gates.js');
+9|   const { createStore } = await import(SRC + 'store.js');
+10|   const cfg = JSON.parse(fs.readFileSync(ROOT + '/dsh-data/config/app.json', 'utf8').replace(/^\uFEFF/, ''));
+11|   const store = createStore();
+12|   const G = '255452871';
+13|   const g = store.gatesFor(G, cfg.gates, 1);
+14|   // 【断言必须用固定基准参数，别用实时值】自学习会按群自动调 utilitySpeakAt / utilityLambda 等
+15|   // （2026-10-08 那次把它调到 speakAt=0.22、lambda=0.7），于是同一个用例的 U 变了、
+16|   // 硬编码的期望就"失败" —— 那是**参数变了**，不是判定逻辑回归。两者必须分开看。
+17|   const BASELINE = { utilitySpeakAt: 0.20, utilityTerseAt: 0.35, utilityDetailedAt: 0.65, utilityLambda: 0.5 };
+18|   console.log('实时参数（已被自学习调过，仅供参考）: speakAt=' + g.utilitySpeakAt + ' terseAt=' + g.utilityTerseAt + ' detailedAt=' + g.utilityDetailedAt + ' lambda=' + g.utilityLambda);
+19|   const gAudit = Object.assign({}, g, BASELINE);
+20|   Object.assign(cfg.gates, BASELINE);
+21|   console.log('断言用基准参数: speakAt=0.20 terseAt=0.35 detailedAt=0.65 lambda=0.5');
+22|   let ok = 0, fail = 0;
+23|   function trial(label, expect, opts) {
+24|     const st = gates.createGateState(); st.selfId = '999';
+25|     const segs = opts.replyId ? [{ type: 'reply', data: { id: opts.replyId } }] : [];
+26|     if (opts.at) segs.push({ type: 'at', data: { qq: '999' } });
+27|     segs.push({ type: 'text', data: { text: opts.text } });
+28|     if (opts.replyId) st.botMsgIds.add(opts.replyId);
+29|     if (opts.cool) st.userLast.set(G + ':u1', Date.now());
+30|     const evt = { post_type: 'message', message_type: 'group', group_id: G, user_id: 'u1', self_id: '999', sender: { card: 'u1' }, message: segs };
+31|     const vc = opts.conf === undefined ? undefined : { judge: () => ({ conf: opts.conf, kind: 'inferred' }), lastBotText: '我刚说过一句', lastBotAt: Date.now() - 8000, people: 2, avgReward: 1.1 };
+32|     const d = gates.decide(evt, cfg, st, { recent: opts.recent || [], gates: gAudit, now: Date.now(), voiceContext: vc });
+33|     const pass = (d.reply === expect);
+34|     if (pass) ok++; else fail++;
+35|     const u = d.utility || {};
+36|     console.log((pass ? '  ok  ' : '  FAIL') + ' ' + label.padEnd(30) + ' reply=' + String(d.reply).padEnd(6) + ' action=' + String(d.action).padEnd(9) + ' U=' + String(u.U).padEnd(7) + ' | ' + String(d.reason).slice(0, 56));
+37|   }
+38|   const botRecent = [{ uid: '999', name: '我', text: '我刚说过一句', at: Date.now() - 8000, self: true, role: 'member' }];
+39|   console.log('--- 硬触发（必回）---');
+40|   trial('@我', true, { at: true, text: '看看这个', conf: 0 });
+41|   trial('回复我', true, { replyId: '777', text: '继续说', conf: 0, recent: botRecent });
+42|   trial('叫外号', true, { text: '大肥鱼你饭还剩多少', conf: 0, recent: botRecent });
+43|   console.log('--- 软路径：对象判断是闸门 ---');
+44|   trial('对象0.10（不是对我说）', false, { text: '搞的我现在都不知道是什么原因了', conf: 0.10, recent: botRecent });
+45|   trial('对象0.15（不是对我说）', false, { text: '搞的我现在都不知道是什么原因了', conf: 0.15, recent: botRecent });
+46|   trial('对象0.25 含糊+我在聊 -> 沉默', false, { text: '搞的我现在都不知道是什么原因了', conf: 0.25, recent: botRecent });
+47|   trial('对象0.45 像是在接我', true, { text: '你刚才那个几层来着', conf: 0.45, recent: botRecent });
+48|   trial('对象0.80 明显接我', true, { text: '那你再讲讲', conf: 0.80, recent: botRecent });
+49|   console.log('--- 其它闸门仍然优先 ---');
+50|   trial('用户冷却中', false, { text: '大肥鱼在吗', conf: 0.9, cool: true });
+51|   console.log('');
+52|   console.log('汇总: 通过 ' + ok + ' / 失败 ' + fail);
+53| }
+54| main().catch(e => console.error('ERR', e && e.message));

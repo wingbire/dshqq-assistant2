@@ -1,0 +1,51 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:58:53.242Z
+# 原始路径名: src/actions.js
+# 提取方式: 文件块(47行,已去行号)
+# ---------- 以下为逐字内容 ----------
+const DEFAULT_WARN_TEXT = "⚠️ 请注意群规，再次违规将被禁言。";
+
+export function createActions(ctx, client, store) {
+async function run(action, meta) {
+const m = meta || {};
+const dry = !!(ctx.config.gates && ctx.config.gates.dryRun);
+const targetId = action.userId === undefined ? (m.userId === undefined ? null : m.userId) : action.userId;
+const groupId = m.groupId === undefined ? null : m.groupId;
+const record = {
+kind: action.kind,
+groupId: groupId === null ? null : String(groupId),
+userId: targetId === null ? null : String(targetId),
+detail: action.kind === "reply" || action.kind === "warn" ? String(action.text || "") : (action.seconds ? action.seconds + "s" : ""),
+reason: m.reason || null,
+dryRun: dry
+};
+if (dry) {
+store.audit(Object.assign({ result: "dryRun" }, record));
+return { ok: true, dryRun: true };
+}
+try {
+const gid = Number(groupId);
+if (action.kind === "recall") {
+await client.call("delete_msg", { message_id: action.messageId });
+} else if (action.kind === "mute") {
+await client.call("set_group_ban", { group_id: gid, user_id: Number(targetId), duration: Number(action.seconds || 60) });
+} else if (action.kind === "unmute") {
+await client.call("set_group_ban", { group_id: gid, user_id: Number(targetId), duration: 0 });
+} else if (action.kind === "kick") {
+await client.call("set_group_kick", { group_id: gid, user_id: Number(targetId), reject_add_request: false });
+} else if (action.kind === "warn") {
+await client.call("send_group_msg", { group_id: gid, message: action.text || DEFAULT_WARN_TEXT });
+} else if (action.kind === "reply") {
+await client.call("send_group_msg", { group_id: gid, message: action.text || "" });
+}
+store.audit(Object.assign({ result: "ok" }, record));
+return { ok: true };
+} catch (e) {
+const msg = String((e && e.message) || e);
+store.audit(Object.assign({ result: "error", error: msg }, record));
+return { ok: false, error: msg };
+}
+}
+
+return { run: run };
+}

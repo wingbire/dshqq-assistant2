@@ -1,0 +1,21 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T16:43:20.523Z
+# 原始路径名: build/_asar/dsh-attachment.js
+# 提取方式: 文件块(17行,已去行号)
+# ---------- 以下为逐字内容 ----------
+  --- /image/ -> 32
+ * Distinguish caller-correctable image admission failures from storage faults.
+ * @param error - failure raised while validating or persisting an image batch.
+ * @returns whether the caller can correct the proposed image content or batch.
+ /** Wire-form admission of base64-encoded image uploads. @module @deepseek-ai/dsh-attachment/admission */
+ function saveInput(image) {
+ data: decodeBase64(image.data),
+  --- /attachment/ -> 30
+ /** Attachment failure class. @module @deepseek-ai/dsh-attachment/error */
+ * Identify attachment failures by their stable code across duplicate package installations.
+ * @param error - failure raised while validating, persisting, or reading an attachment.
+ * @returns whether the failure carries a recognized attachment error code.
+ /** Wire-form admission of base64-encoded image uploads. @module @deepseek-ai/dsh-attachment/admission */
+ * @param attachments - the deployment attachment store owning batch policy.
+  --- /deepseek-v4|model.*flash|capabilit/ -> 1
+ * Identify a failure emitted by this attachment capability by its stable code.

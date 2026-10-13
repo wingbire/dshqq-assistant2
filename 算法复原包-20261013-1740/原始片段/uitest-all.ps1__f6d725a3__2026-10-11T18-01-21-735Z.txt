@@ -1,0 +1,93 @@
+# 来源会话: dsh-session-f6d725a3-f6dd-407e-bba8-b189127a0c85
+# 记录时间: 2026-10-11T18:01:21.735Z
+# 原始路径名: uitest-all.ps1
+# 提取方式: 文件块(89行)
+# ---------- 以下为逐字内容 ----------
+(total 84)
+1| # 一键跑完界面交互测试与「启用/停用」行为验证：全程在隔离数据目录里，不碰真实配置。
+2| # 用法：powershell -File build\uitest-all.ps1
+3| $ErrorActionPreference = "Stop"
+4| $root = Split-Path -Parent $PSScriptRoot
+5| Set-Location $root
+6| $port = 7818
+7| $mockPort = 3996
+8| $group = "255452871"
+9| $base = Join-Path $root "build\_ui"
+10| $data = Join-Path $base "dsh-data"
+11| 
+12| # 【必须】node 调用一律带硬超时：否则测试一旦卡住（CDP 无响应、页面不渲染），
+13| # 这个脚本会一直等下去，把整条命令乃至会话拖死。2026-10 真被卡过一次。
+14| function Run-Node([string[]]$Arguments, [int]$TimeoutSec) {
+15|   # 直接调用（不用 Start-Process）—— 本机 PowerShell 里 Start-Process -PassThru 的 ExitCode 取不到，
+16|   # 会让「测试全过」也报失败。$LASTEXITCODE 可靠。
+17|   # 超时靠后台守护 job：到点只杀「隔离实例」的 node（命令行含 _ui / uitest / behavior-test），绝不碰真实服务。
+18|   $watch = Start-Job -ScriptBlock {
+19|     param($sec)
+20|     Start-Sleep -Seconds $sec
+21|     Get-CimInstance Win32_Process |
+22|       Where-Object { $_.Name -eq "node.exe" -and ($_.CommandLine -like "*_ui*" -or $_.CommandLine -like "*uitest*" -or $_.CommandLine -like "*behavior-test*") } |
+23|       ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+24|   } -ArgumentList $TimeoutSec
+25|   # 【必须】用 Write-Host 打到控制台，不能让它进函数返回值 ——
+26|   # 否则调用处 ((Run-Node ...) -eq 0) 会把整段输出当成返回值比较，既看不见输出、判定也永远是 false。
+27|   & node @Arguments 2>&1 | ForEach-Object { Write-Host $_ }
+28|   $code = $LASTEXITCODE
+29|   if ($watch) { Stop-Job $watch -ErrorAction SilentlyContinue; Remove-Job $watch -Force -ErrorAction SilentlyContinue }
+30|   if ($null -eq $code) { $code = 1 }
+31|   return [int]$code
+32| }
+33| 
+34| Write-Host "1) 准备隔离数据目录 build\_ui\dsh-data"
+35| Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
+36| New-Item -ItemType Directory -Force -Path (Join-Path $data "config"), (Join-Path $data "data\groups") | Out-Null
+37| Copy-Item (Join-Path $root "dsh-data\data\
+ules.json") (Join-Path $data "data\
+ules.json") -Force
+38| Copy-Item (Join-Path $root "dsh-data\data\groups-index.json") (Join-Path $data "data\groups-index.json") -Force
+39| Copy-Item (Join-Path $root "dsh-data\data\groups\*.json") (Join-Path $data "data\groups\") -Force -ErrorAction SilentlyContinue
+40| 
+41| # 【回复形态面板测试】预置 data/reply-shape.json：
+42| #   本群 255452871 = 回复 7 次 / 拆两条 2 次 / 切尾 1 次 / 常规档偏移 +10；
+43| #   另一个群 999000001 = 回复 3 次 / 拆两条 1 次 / 无偏移。
+44| # 用途：uitest 验证「群操作里显示统计」「换群能刷新」「清零后 n 归 0 且偏移清空」。
+45| # 必须无 BOM：replyshape.js 直接 JSON.parse，带 BOM 会解析失败并被静默当成空数据（这个坑踩过）。
+46| $shape = '{"groups":{"255452871":{"n":7,"split":2,"cutTail":1,"byMode":{"single":4,"split-comma":2,"split-comma+cut":1},"byDepth":{"standard":{"n":7,"split":2,"cutTail":1,"maxLen":90}},"offsets":{"standard":10},"lastAt":0,"lastBumpAt":0,"history":[]},"999000001":{"n":3,"split":1,"cutTail":0,"byMode":{"single":2,"split-comma":1},"byDepth":{"standard":{"n":3,"split":1,"cutTail":0,"maxLen":90}},"offsets":{},"lastAt":0,"lastBumpAt":0,"history":[]}}}'
+47| [System.IO.File]::WriteAllText((Join-Path $data "data\
+eply-shape.json"), $shape, (New-Object System.Text.UTF8Encoding($false)))
+48| 
+49| $cfg = @"
+50| {
+51|   "server": { "host": "127.0.0.1", "port": $port, "openBrowser": false, "requireToken": "strict" },
+52|   "onebot": { "url": "ws://127.0.0.1:$mockPort", "token": "testtoken", "reconnectMs": 3000 },
+53|   "brain": { "enabled": false },
+54|   "napcat": { "launcherPath": "", "qq": "", "autoStart": false, "hideConsole": true },
+55|   "gates": { "dryRun": true, "cooldownSec": 0, "perMinute": 99 },
+56|   "balance": { "enabled": false }
+57| }
+58| "@
+59| Set-Content -Path (Join-Path $data "config\app.json") -Value $cfg -Encoding UTF8
+60| Set-Content -Path (Join-Path $data "launcher.log") -Value "" -Encoding UTF8
+61| 
+62| Write-Host "2) 起 mock OneBot 与 Node（端口 $mockPort / $port）"
+63| $mock = Start-Process -FilePath "node" -ArgumentList @("tools\mock-onebot.js", "--port", "$mockPort", "--token", "testtoken", "--self", "3562614549", "--group", "$group") -PassThru -WindowStyle Hidden
+64| $env:DSHQQ_DATA_DIR = $data
+65| $env:DSHQQ_PORT = "$port"
+66| $env:DSHQQ_NO_OPEN = "1"
+67| $srv = Start-Process -FilePath "node" -ArgumentList @("src\main.js") -PassThru -WindowStyle Hidden
+68| try {
+69|   Start-Sleep -Seconds 4
+70|   # 【顺序】先跑行为验证：它对"历史流量"敏感（flood/配额/群状态），要在干净实例上跑。
+71|   # UI 套件自己会设置所需前置状态，后跑不受影响。
+72|   Write-Host "3) 启用/停用行为验证"
+73|   $env:UI_PANEL = "http://127.0.0.1:$port"; $env:UI_MOCK = "http://127.0.0.1:$mockPort"
+74|   $behavOk = ((Run-Node @("build\behavior-test.mjs", "build/_ui/dsh-data", "$group") 150) -eq 0)
+75|   Write-Host ""
+76|   Write-Host "4) 交互测试（CDP 驱动真实页面；node 侧每个请求都有 5 秒超时，不会挂死）"
+77|   $uitestOk = ((Run-Node @("build\uitest.mjs", "--url", "http://127.0.0.1:$port/", "--datadir", "build/_ui/dsh-data", "--group", "$group", "--mock", "http://127.0.0.1:$mockPort") 240) -eq 0)
+78| } finally {
+79|   Stop-Process -Id $srv.Id -Force -ErrorAction SilentlyContinue
+80|   Stop-Process -Id $mock.Id -Force -ErrorAction SilentlyContinue
+81|   Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq "node.exe" -or $_.Name -eq "msedge.exe") -and $_.CommandLine -like "*_ui*" } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+82|   Remove-Item -Recurse -Force $base -ErrorAction SilentlyContinue
+83| }
+84| if ($uitestOk -and $behavOk) { Write-Host "全部通过"; exit 0 } else { Write-Host "有失败"; exit 1 }

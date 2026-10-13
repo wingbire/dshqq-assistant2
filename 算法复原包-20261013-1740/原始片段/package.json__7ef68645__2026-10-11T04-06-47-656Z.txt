@@ -1,0 +1,16 @@
+# 来源会话: dsh-session-7ef68645-e229-46df-885c-553e2818f36b
+# 记录时间: 2026-10-11T04:06:47.656Z
+# 原始路径名: package.json
+# 提取方式: 文件块(12行)
+# ---------- 以下为逐字内容 ----------
+{
+  "name": "fish-video-studio",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "大肥鱼视频工坊 — 群聊实录日更流水线",
+  "scripts": {
+    "start": "node app/server.mjs",
+    "pipe": "node app/cli.mjs"
+  }
+}

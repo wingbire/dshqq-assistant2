@@ -1,0 +1,224 @@
+# 来源会话: dsh-session-bb289691-ec7d-475c-86c4-78d1fb86e941
+# 记录时间: 2026-10-06T08:15:14.252Z
+# 原始路径名: src\server.js
+# 提取方式: 文件块(220行)
+# ---------- 以下为逐字内容 ----------
+1| import http from "node:http";
+2| import fs from "node:fs";
+3| import path from "node:path";
+4| import { APP_ROOT, FEED_DIR } from "./paths.js";
+5| import { detectDsh } from "./dsh.js";
+6| 
+7| const MIME = {
+8|   ".html": "text/html; charset=utf-8",
+9|   ".js": "text/javascript; charset=utf-8",
+10|   ".css": "text/css; charset=utf-8",
+11|   ".json": "application/json; charset=utf-8",
+12|   ".svg": "image/svg+xml",
+13|   ".png": "image/png",
+14|   ".jpg": "image/jpeg",
+15|   ".jpeg": "image/jpeg",
+16|   ".gif": "image/gif",
+17|   ".webp": "image/webp",
+18|   ".ico": "image/x-icon"
+19| };
+20| 
+21| function sendJson(res, code, obj) {
+22|   const body = JSON.stringify(obj);
+23|   res.writeHead(code, { "content-type": "application/json; charset=utf-8", "content-length": Buffer.byteLength(body) });
+24|   res.end(body);
+25| }
+26| 
+27| function readBody(req) {
+28|   return new Promise(function (resolve, reject) {
+29|     let data = "";
+30|     req.on("data", function (c) { data += c; if (data.length > 2e6) { req.destroy(); reject(new Error("body too large")); } });
+31|     req.on("end", function () { resolve(data); });
+32|     req.on("error", reject);
+33|   });
+34| }
+35| 
+36| function serveFeedQr(ctx, res, url) {
+37|   const feed = (ctx.config && ctx.config.feed) || {};
+38|   let src = String(feed.imagePath || "").trim();
+39|   // 自动抓取的二维码存在 feed 目录里，用 ?f=文件名 指定；只允许纯文件名，防目录穿越
+40|   const f = url && url.searchParams ? url.searchParams.get("f") : null;
+41|   if (f) {
+42|     const safe = path.basename(String(f));
+43|     if (safe && /\.(png|jpe?g|gif|webp)$/i.test(safe)) {
+44|       const cand = path.join(FEED_DIR, safe);
+45|       try { if (fs.existsSync(cand) && fs.statSync(cand).isFile()) src = cand; } catch (e) {}
+46|     }
+47|   }
+48|   if (!feed.enabled || !src || src.indexOf("http") === 0) {
+49|     res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+50|     return res.end("no feed image");
+51|   }
+52|   try {
+53|     if (!fs.existsSync(src) || !fs.statSync(src).isFile()) {
+54|       res.writeHead(404); return res.end("file missing");
+55|     }
+56|     const ext = path.extname(src).toLowerCase();
+57|     res.writeHead(200, { "content-type": MIME[ext] || "image/png" });
+58|     return fs.createReadStream(src).pipe(res);
+59|   } catch (e) {
+60|     res.writeHead(500); return res.end("error");
+61|   }
+62| }
+63| 
+64| export function createServer(ctx) {
+65|   const publicDir = path.join(APP_ROOT, "public");
+66|   return http.createServer(async function (req, res) {
+67|     const url = new URL(req.url, "http://" + (req.headers.host || "127.0.0.1"));
+68|     try {
+69|       if (url.pathname === "/feed-qr") return serveFeedQr(ctx, res, url);
+70|       if (url.pathname.indexOf("/api/") === 0) return await handleApi(ctx, req, res, url);
+71|       if (req.method !== "GET" && req.method !== "HEAD") { res.writeHead(405); return res.end(); }
+72|       const rel = url.pathname === "/" ? "index.html" : url.pathname.replace(/^[\/]+/, "");
+73|       const file = path.resolve(publicDir, rel);
+74|       if (file.indexOf(publicDir) !== 0 || !fs.existsSync(file) || !fs.statSync(file).isFile()) {
+75|         res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+76|         return res.end("404");
+77|       }
+78|       res.writeHead(200, { "content-type": MIME[path.extname(file).toLowerCase()] || "application/octet-stream" });
+79|       return fs.createReadStream(file).pipe(res);
+80|     } catch (err) {
+81|       sendJson(res, 500, { ok: false, error: String((err && err.message) || err) });
+82|     }
+83|   });
+84| }
+85| 
+86| async function handleApi(ctx, req, res, url) {
+87|   const p = url.pathname;
+88|   if (p === "/api/status" && req.method === "GET") {
+89|     return sendJson(res, 200, {
+90|       ok: true,
+91|       name: "DSH-QQ 群小助手",
+92|       version: ctx.version,
+93|       uptimeSec: Math.round((Date.now() - ctx.startedAt) / 1000),
+94|       dataRoot: ctx.dataRoot,
+95|       dsh: ctx.getDshStatus(),
+96|       onebot: ctx.getOnebotStatus(),
+97|       stats: ctx.getStats(),
+98|       brain: { tier: ctx.config.brain.tier }
+99|     });
+100|   }
+101|   if (p === "/api/events" && req.method === "GET") {
+102|     return sendJson(res, 200, { ok: true, events: ctx.getEvents() });
+103|   }
+104|   if (p === "/api/events" && req.method === "DELETE") {
+105|     ctx.clearEvents();
+106|     return sendJson(res, 200, { ok: true });
+107|   }
+108|   if (p === "/api/groups" && req.method === "GET") {
+109|     let live = [];
+110|     let liveError = null;
+111|     try { live = (await ctx.callOnebot("get_group_list", {})) || []; }
+112|     catch (e) { liveError = String((e && e.message) || e); }
+113|     const map = {};
+114|     for (const g of ctx.knownGroups()) map[String(g.groupId)] = { groupId: String(g.groupId), name: g.name, messages: g.messages, lastSeen: g.lastSeen, live: false };
+115|     for (const g of live) {
+116|       const id = String(g.group_id);
+117|       const name = g.group_name || null;
+118|       if (name) ctx.setGroupName(id, name);
+119|       map[id] = Object.assign({ groupId: id, name: name || (map[id] && map[id].name) || null, messages: (map[id] && map[id].messages) || 0, lastSeen: (map[id] && map[id].lastSeen) || 0 }, { live: true });
+120|     }
+121|     const rules = ctx.getRules();
+122|     const groups = Object.keys(map).map(function (k) {
+123|       const g = map[k];
+124|       const ov = (rules.groups && rules.groups[k]) || {};
+125|       const eff = ctx.rulesFor(k);
+126|       g.rulesEnabled = eff.enabled !== false;
+127|       g.groupOverride = Object.prototype.hasOwnProperty.call(ov, "enabled") ? !!ov.enabled : null;
+128|       return g;
+129|     }).sort(function (a, b) { return (b.lastSeen || 0) - (a.lastSeen || 0); });
+130|     return sendJson(res, 200, { ok: true, groups: groups, liveError: liveError });
+131|   }
+132|   if (p === "/api/config" && req.method === "GET") return sendJson(res, 200, { ok: true, config: ctx.config });
+133|   if (p === "/api/config" && req.method === "PUT") {
+134|     const body = await readBody(req);
+135|     ctx.updateConfig(JSON.parse(body || "{}"));
+136|     return sendJson(res, 200, { ok: true, config: ctx.config });
+137|   }
+138|   if (p === "/api/dsh/detect" && req.method === "POST") {
+139|     return sendJson(res, 200, { ok: true, dsh: detectDsh(ctx.config.brain.dshCliPath) });
+140|   }
+141|   if (p === "/api/stats" && req.method === "GET") return sendJson(res, 200, { ok: true, stats: ctx.getStats() });
+142|   if (p === "/api/rules" && req.method === "GET") return sendJson(res, 200, { ok: true, rules: ctx.getRules() });
+143|   if (p === "/api/rules" && req.method === "PUT") {
+144|     const body = await readBody(req);
+145|     ctx.updateRules(JSON.parse(body || "{}"));
+146|     return sendJson(res, 200, { ok: true, rules: ctx.getRules() });
+147|   }
+148|   if (p === "/api/rules/group" && req.method === "PUT") {
+149|     const body = await readBody(req);
+150|     const parsed = JSON.parse(body || "{}");
+151|     ctx.setGroupRules(String(parsed.groupId), parsed.patch || {});
+152|     return sendJson(res, 200, { ok: true });
+153|   }
+154|   if (p === "/api/rules/effective" && req.method === "GET") {
+155|     const gid = url.searchParams.get("groupId") || "";
+156|     return sendJson(res, 200, { ok: true, rules: ctx.rulesFor(gid) });
+157|   }
+158|   if (p === "/api/audit" && req.method === "GET") {
+159|     const limit = Number(url.searchParams.get("limit") || 100);
+160|     return sendJson(res, 200, { ok: true, audit: ctx.getAudit(limit) });
+161|   }
+162|   if (p === "/api/agent" && req.method === "GET") {
+163|     return sendJson(res, 200, { ok: true, agent: ctx.getAgentStatus() });
+164|   }
+165|   if (p === "/api/agent/reset" && req.method === "POST") {
+166|     const body = await readBody(req);
+167|     const parsed = JSON.parse(body || "{}");
+168|     if (parsed.groupId) ctx.resetSession(String(parsed.groupId));
+169|     return sendJson(res, 200, { ok: true });
+170|   }
+171|   if (p === "/api/secrets" && req.method === "GET") {
+172|     return sendJson(res, 200, { ok: true, secrets: ctx.getSecretsInfo() });
+173|   }
+174|   if (p === "/api/secrets" && req.method === "PUT") {
+175|     const body = await readBody(req);
+176|     const parsed = JSON.parse(body || "{}");
+177|     const patch = {};
+178|     if (typeof parsed.deepseekApiKey === "string") patch.deepseekApiKey = parsed.deepseekApiKey.trim();
+179|     ctx.setSecrets(patch);
+180|     return sendJson(res, 200, { ok: true, secrets: ctx.getSecretsInfo() });
+181|   }
+182|   if (p === "/api/feed/preview" && req.method === "GET") {
+183|     try { return sendJson(res, 200, Object.assign({ ok: true }, await ctx.previewFeed())); }
+184|     catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+185|   }
+186|   if (p === "/api/recharge" && req.method === "GET") return sendJson(res, 200, { ok: true, recharge: ctx.getRechargeStatus() });
+187|   if (p === "/api/recharge/capture" && req.method === "POST") {
+188|     let opts = {};
+189|     try { const b = await readBody(req); opts = b ? JSON.parse(b) : {}; } catch (e) { opts = {}; }
+190|     const r = await ctx.captureRecharge({ force: opts.force !== false, bypassBackoff: !!opts.bypassBackoff });
+191|     return sendJson(res, 200, Object.assign({ recharge: ctx.getRechargeStatus() }, r));
+192|   }
+193|   if (p === "/api/recharge/login" && req.method === "POST") {
+194|     try { return sendJson(res, 200, await ctx.openRechargeLogin()); }
+195|     catch (e) { return sendJson(res, 200, { ok: false, error: String((e && e.message) || e) }); }
+196|   }
+197|   if (p === "/api/recharge/clear" && req.method === "POST") return sendJson(res, 200, ctx.clearRechargeQrs());
+198|   if (p === "/api/napcat" && req.method === "GET") return sendJson(res, 200, { ok: true, napcat: await ctx.getNapcatStatus() });
+199|   if (p === "/api/napcat/start" && req.method === "POST") {
+200|     let opts = {};
+201|     try { const b = await readBody(req); opts = b ? JSON.parse(b) : {}; } catch (e) { opts = {}; }
+202|     const r = await ctx.startNapcat({ show: !!opts.show });
+203|     return sendJson(res, 200, Object.assign({ napcat: await ctx.getNapcatStatus() }, r));
+204|   }
+205|   if (p === "/api/napcat/stop" && req.method === "POST") {
+206|     const r = await ctx.stopNapcat();
+207|     return sendJson(res, 200, Object.assign({ napcat: await ctx.getNapcatStatus() }, r));
+208|   }
+209|   if (p === "/api/usage" && req.method === "GET") return sendJson(res, 200, { ok: true, usage: ctx.getUsage() });
+210|   if (p === "/api/usage" && req.method === "DELETE") { ctx.resetUsage(); return sendJson(res, 200, { ok: true }); }
+211|   if (p === "/api/agent/summarize" && req.method === "POST") {
+212|     const body = await readBody(req);
+213|     const parsed = JSON.parse(body || "{}");
+214|     if (!parsed.groupId) return sendJson(res, 200, { ok: false, error: "缺少 groupId" });
+215|     const r = await ctx.summarizeGroup(String(parsed.groupId));
+216|     return sendJson(res, 200, { ok: !!r.ok, text: r.text || null, error: r.error || null });
+217|   }
+218|   return sendJson(res, 404, { ok: false, error: "unknown api: " + p });
+219| }

@@ -1,0 +1,33 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:59:25.848Z
+# 原始路径名: build/sim-full.cjs
+# 提取方式: 文件块(29行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 全链路模拟：先跑真实判定（带评分与依据），判定要回才真调模型出回复
+const fs = require('fs');
+const ROOT = 'E:/dshQ群小助手配置端';
+const GID = '255452871', BOT = '3562614549';
+async function main() {
+const gates = await import('file:///E:/dshQ群小助手配置端/src/gates.js');
+const { createStore } = await import('file:///E:/dshQ群小助手配置端/src/store.js');
+const { createAddressee } = await import('file:///E:/dshQ群小助手配置端/src/addressee.js');
+const { createDshAgent } = await import('file:///E:/dshQ群小助手配置端/src/dshagent.js');
+const { createUsage } = await import('file:///E:/dshQ群小助手配置端/src/usage.js');
+const { createBalance } = await import('file:///E:/dshQ群小助手配置端/src/balance.js');
+const { createFeedback } = await import('file:///E:/dshQ群小助手配置端/src/feedback.js');
+const { createBandit } = await import('file:///E:/dshQ群小助手配置端/src/bandit.js');
+const { detectDsh } = await import('file:///E:/dshQ群小助手配置端/src/dsh.js');
+const cfg = JSON.parse(fs.readFileSync(ROOT + '/dsh-data/config/app.json', 'utf8').replace(/^\uFEFF/, ''));
+const store = createStore();
+const g = store.gatesFor(GID, cfg.gates, 1);
+const ad0 = createAddressee({ weightsFile: ROOT + '/dsh-data/data/addressee-weights.json' });
+const ctx = { config: cfg, getDshStatus: () => detectDsh(cfg.brain.dshCliPath), getEvents: () => [], addressee: ad0 };
+const usage = createUsage();
+const balance = createBalance(ctx);
+const feedback = createFeedback({ file: ROOT + '/build/sim-fb.json', addressee: () => ad0, scoreConfig: () => ({ lambda: 1, alpha: .25, beta: .8 }) });
+const bandit = createBandit({ file: ROOT + '/build/sim-ba.json', rng: () => 0.5 });
+const agent = createDshAgent(ctx, store, usage, balance, feedback, bandit);
+const BOT_TEXT = '行啊，那你们先练着，反正我这周是不想再碰第五层了';
+const BASE_RECENT = [
+{ uid: '1351846399', name: '黑鸟wingbire', role: 'owner', text: '昨晚那把打完了没', self: false, at: 1 },
+{ uid: '3089451646', name: '钢臂银狼', role: 'member', text: '打完了，镜牢六层', self: false, at: 2 },

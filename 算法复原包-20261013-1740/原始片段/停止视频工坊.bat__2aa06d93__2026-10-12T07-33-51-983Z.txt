@@ -1,0 +1,18 @@
+# 来源会话: dsh-session-2aa06d93-433f-4092-af80-b44e2ca5fdb9
+# 记录时间: 2026-10-12T07:33:51.983Z
+# 原始路径名: 停止视频工坊.bat
+# 提取方式: 文件块(14行)
+# ---------- 以下为逐字内容 ----------
+@echo off
+setlocal
+set "PORT=17890"
+set "FOUND="
+for /f "tokens=5" %%a in ('netstat -ano ^| findstr ":%PORT% " ^| findstr LISTENING') do (
+  echo Stopping PID %%a
+  taskkill /PID %%a /F >nul 2>nul
+  set "FOUND=1"
+)
+if not defined FOUND echo No server is listening on port %PORT%.
+timeout /t 1 /nobreak >nul
+endlocal
+

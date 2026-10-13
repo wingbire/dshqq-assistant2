@@ -1,0 +1,59 @@
+# 来源会话: dsh-session-b786d586-9deb-4081-a636-5b17c224b31a
+# 记录时间: 2026-10-11T01:16:38.561Z
+# 原始路径名: usage.json
+# 提取方式: 文件块(55行)
+# ---------- 以下为逐字内容 ----------
+{
+ "days": {
+  "2026-10-06": {
+   "calls": 74,
+   "inputTokens": 88926,
+   "cacheReadTokens": 569344,
+   "outputTokens": 7927,
+   "totalTokens": 666197,
+   "cost": 0.20000487999999997,
+   "byGroup": {
+    "255452871": {
+     "calls": 71,
+     "inputTokens": 81250,
+     "cacheReadTokens": 562432,
+     "outputTokens": 7341,
+     "totalTokens": 651023,
+     "cost": 0.18984663999999996,
+     "cached": 0,
+     "merged": 0,
+     "deduped": 0,
+     "billableTokens": 55696
+    },
+    "群档案提炼": {
+     "calls": 3,
+     "inputTokens": 7676,
+     "cacheReadTokens": 6912,
+     "outputTokens": 586,
+     "totalTokens": 15174,
+     "billableTokens": 8262,
+     "cost": 0.010158239999999999,
+     "cached": 0,
+     "merged": 0,
+     "deduped": 0
+    }
+   },
+   "billableTokens": 63958
+  },
+  "2026-10-08": {
+   "calls": 134,
+   "inputTokens": 71360,
+   "cacheReadTokens": 437632,
+   "outputTokens": 24188,
+   "totalTokens": 533180,
+   "billableTokens": 95548,
+   "cost": 0.19456311999999995,
+   "byGroup": {
+    "227500650": {
+     "calls": 13,
+     "inputTokens": 10936,
+     "cacheReadTokens": 78720,
+     "outputTokens": 15350,
+     "totalTokens": 105006,
+     "billableTokens": 26286,
+     "cost": 0.073910

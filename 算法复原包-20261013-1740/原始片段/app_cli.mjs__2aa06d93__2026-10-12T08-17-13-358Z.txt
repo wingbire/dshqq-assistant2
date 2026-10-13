@@ -1,0 +1,38 @@
+# 来源会话: dsh-session-2aa06d93-433f-4092-af80-b44e2ca5fdb9
+# 记录时间: 2026-10-12T08:17:13.358Z
+# 原始路径名: app/cli.mjs
+# 提取方式: 文件块(33行)
+# ---------- 以下为逐字内容 ----------
+长度: 3657
+import path from "node:path";
+import { loadConfig, WORKSPACE } from "./lib/env.mjs";
+import { checkEnv } from "./lib/env.mjs";
+import * as A from "./lib/assets.mjs";
+import * as R from "./lib/recipes.mjs";
+import * as P from "./pipeline.mjs";
+
+function log(s) { console.log(s); }
+function pad(n, w) { var s = String(n); while (s.length < w) s = "0" + s; return s; }
+
+var argv = process.argv.slice(2);
+var cmd = argv[0] || "help";
+var date = argv[1] || "";
+
+async function main() {
+  if (cmd === "env") {
+    var r = await checkEnv(loadConfig());
+    console.log(JSON.stringify(r, null, 2));
+    return;
+  }
+  if (cmd === "new") {
+    console.log(JSON.stringify(P.createProject(date, argv[2] || "", argv[3] || 210), null, 2));
+    return;
+  }
+  if (cmd === "ls") {
+    console.log(JSON.stringify(P.listProjects(), null, 2));
+    return;
+  }
+  if (cmd === "status") {
+    var p = P.readProject(date);
+    console.log("旁白 " + p.narration.length + " 段 / 聊天 " + p.chat.messages.length + " 条（" + p.chat.pattern + "）");
+    p.files.forEach(function (f) { console.log("  " + (f.exists ? "✅" : "⬜") + " " + f."}]

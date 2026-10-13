@@ -1,0 +1,19 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T16:43:20.523Z
+# 原始路径名: build/_asar/dsh-attachment-local.js
+# 提取方式: 文件块(15行,已去行号)
+# ---------- 以下为逐字内容 ----------
+  --- /image/ -> 78
+ /** Instance-owned concurrency bound for native image transformations. */
+ /** Shared quality ladder and lazy candidate execution for normalization and request-image encoders. */
+ const { data, info } = await (mediaType === "image/webp" ? pipeline.webp({
+ const mediaType = hasAlpha ? "image/webp" : "image/jpeg";
+ if (first === void 0) throw new Error("image encoding requires at least one candidate");
+ //#region lib/types/image.js
+  --- /attachment/ -> 71
+ import { AttachmentError, AttachmentId, AttachmentStore, ImageVariantId, requestImageDimensions } from "@deepseek-ai/dsh-attachment";
+ /** Content-addressed, owner-private local attachment storage. */
+ const match = ID_PATTERN.exec(String(ref.attachmentId));
+ * Derive the absolute immutable-object path for one normalized attachment.
+ * @param root - absolute `DSH_HOME/attachments/v1` root.
+ * @param ref - durable normalized attachment reference.

@@ -1,0 +1,23 @@
+# 来源会话: dsh-session-f6d725a3-f6dd-407e-bba8-b189127a0c85
+# 记录时间: 2026-10-11T18:04:42.455Z
+# 原始路径名: index.html
+# 提取方式: 文件块(18行)
+# ---------- 以下为逐字内容 ----------
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<!-- 本机访问令牌：由 server.js 在返回本页时注入，跨站页面读不到（无 CORS） -->
+<meta name="dshqq-token" content="__DSHQQ_TOKEN__">
+<title>DSH-QQ 群小助手</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app"></div>
+<div class="toast" id="toast"></div>
+<script src="app.js"></script>
+</body>
+</html>
+
+"}]

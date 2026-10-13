@@ -1,0 +1,13 @@
+# 来源会话: dsh-session-9526d43e-fc0a-49d3-be09-06f41962c227
+# 记录时间: 2026-10-08T11:34:41.310Z
+# 原始路径名: classify.js
+# 提取方式: 文件块(8行,已去行号)
+# ---------- 以下为逐字内容 ----------
+ const CACHE_MAX = 300;
+   function budgetState() {
+     const maxPerHour = clampNum(c.maxPerHour, 30, 0, 1000);
+     const b = budgetState();
+       const b = budgetState();
+         st.lastError = "已达上限（本小时 " + b.usedHour + "/" + b.maxPerHour + "，今日 " + b.usedDay + "/" + b.dailyBudget + " 计费 token）";
+   return { decide: decide, status: status, enabled: enabled, reset: reset, budgetState: budgetState, noteMessage: noteMessage, BUCKET: BUCKET };
+File sandbox enforcement is partial on this host."}]

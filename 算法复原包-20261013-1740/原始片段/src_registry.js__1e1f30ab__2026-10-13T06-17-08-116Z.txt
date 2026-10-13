@@ -1,0 +1,59 @@
+# 来源会话: dsh-session-1e1f30ab-1f08-49e8-b075-a86ac6460b77
+# 记录时间: 2026-10-13T06:17:08.116Z
+# 原始路径名: src/registry.js
+# 提取方式: 文件块(55行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 功能模块登记表（新架构的**单源**）。协议 ⑦三 接入层第一件：工具清单。
+//
+// 状态三态（协议要求，不许合并成一句「没有这个能力」）：
+//   可用   —— 有实现、依赖齐
+//   缺件   —— 已登记，但实现尚未包装成唯一入口（Step 2 的活），或缺依赖
+//   已移除 —— 刻意删掉对接，UI/接口保留，调用时如实报缺口
+//
+// 本文件**只放登记数据与查询**，不含业务判断；分派在 dispatch.js（判定中枢）。
+export const 状态 = { 可用: "可用", 缺件: "缺件", 已移除: "已移除" };
+
+export const 模块 = [
+{ 编号: "vision-in", 名称: "听懂图片", 状态: "缺件", 输入: "群消息里的图片段", 输出: "把图片段换成文本段进判定层", 入口: "群消息自动（开关 vision.enabled）", 实现: "src/vision.js", 依赖: "视觉接口 + API Key", 成本: "约 3s · 按图计费", 逃生通道: "关掉开关（不发）" },
+{ 编号: "voice-in", 名称: "听懂语音", 状态: "缺件", 输入: "群消息里的语音段", 输出: "转写文本替换语音段", 入口: "群消息自动（开关 voice.inbound）", 实现: "src/voicein.js", 依赖: "DSH 自带 SenseVoice", 成本: "约 0.8s · 零费用", 逃生通道: "保留 [语音] 占位" },
+{ 编号: "voice-out", 名称: "用语音回复", 状态: "缺件", 输入: "要发的文本", 输出: "语音消息", 入口: "出向自动（开关 voice.outbound）", 实现: "src/voiceout.js", 依赖: "NapCat 音色接口", 成本: "约 1.5s · 零费用", 逃生通道: "退回文字" },
+{ 编号: "meme-send", 名称: "发/收表情包", 状态: "缺件", 输入: "回复里的 [表情: 描述] 标记", 输出: "[CQ:image] 段", 入口: "出向自动（开关 image.enabled）", 实现: "src/memelib.js", 依赖: "dsh-meme 插件图库（node:sqlite 只读）", 成本: "约 50ms · 零费用", 逃生通道: "自建 images/ 图库" },
+{ 编号: "refvideo-read", 名称: "读 B 站链接", 状态: "缺件", 输入: "群消息里的 B 站链接", 输出: "brief 进上下文 + 事件四项过程", 入口: "群消息 + refvideo.trigger", 实现: "src/biliref.js", 依赖: "ffmpeg + headless profile", 成本: "60s · 零费用", 逃生通道: "自建图库（image.source=local）" },
+{ 编号: "mimo-channel", 名称: "独立模型通道", 状态: "可用", 输入: "任务文本 / 图片绝对路径列表", 输出: "模型原文 / JSON", 入口: "src/mimo.js 的 askMiMo / askWithImages", 实现: "src/mimo.js", 依赖: "dsh.cmd + patch.yml + headless profile", 成本: "启动 10~16s + 推理", 逃生通道: "直接跑 dsh" },
+{ 编号: "audit-panel", 名称: "面板外审", 状态: "可用", 输入: "文本（架构材料）或截图目录", 输出: "报告落 dsh-data/audit/", 入口: "node build/audit-panel.mjs --mode arch|frames", 实现: "build/audit-panel.mjs", 依赖: "mimo-channel", 成本: "文本约 60s；6 帧约 3min", 逃生通道: "只用 arch 模式" },
+{ 编号: "capability-list", 名称: "能力与模块清单", 状态: "可用", 输入: "无", 输出: "能力表 + 模块登记表", 入口: "node build/capabilities.mjs [--模块]", 实现: "src/capabilities.js", 依赖: "无", 成本: "秒级", 逃生通道: "直接读 模块.json" },
+{ 编号: "label-train", 名称: "本地打分器训练", 状态: "缺件", 输入: "人工标注样本", 输出: "本地打分器权重", 入口: "POST /api/label/train", 实现: "src/addressee-train.js", 依赖: "标注数据", 成本: "秒级", 逃生通道: "用默认权重" },
+{ 编号: "group-profile", 名称: "群档案提炼", 状态: "缺件", 输入: "群聊环形缓冲", 输出: "该群档案与经验教训", 入口: "自动（按条数/时间）", 实现: "src/profile.js", 依赖: "大脑通道", 成本: "一次模型调用", 逃生通道: "关掉 autoSummarize" },
+{ 编号: "http-api", 名称: "HTTP 接口面", 状态: "缺件", 输入: "HTTP 请求（本机 + 令牌）", 输出: "JSON", 入口: "面板与标注页（77 条路由）", 实现: "src/server.js", 依赖: "schema.js 字段契约", 成本: "毫秒级", 逃生通道: "直接改 dsh-data/config/app.json" },
+{ 编号: "onebot-bridge", 名称: "OneBot 接入", 状态: "缺件", 输入: "群消息事件", 输出: "事件进流水线", 入口: "常驻连接", 实现: "src/onebot.js", 依赖: "NapCat + 本机 ws", 成本: "常驻", 逃生通道: "直接调 判定中枢" },
+{ 编号: "napcat-host", 名称: "NapCat 托管", 状态: "缺件", 输入: "启停指令", 输出: "NapCat 进程状态", 入口: "POST /api/napcat/start|stop", 实现: "src/napcat.js", 依赖: "napcat-onekey/NapCat.Shell.zip", 成本: "秒级", 逃生通道: "手动开 NapCat" },
+];
+
+export function get(id) {
+var k = String(id || "");
+for (var i = 0; i < 模块.length; i++) if (模块[i].编号 === k) return 模块[i];
+return null;
+}
+export function list() { return 模块.slice(); }
+
+// 缺口上报（协议：能力缺口必须上报，不许静默降级）
+export function 缺口(id) {
+var m = get(id);
+if (!m) return { asked: String(id || ""), closest: "最接近的是清单里的其它模块", missing: "这个编号没有登记" };
+if (m.状态 === 状态.已移除) return { asked: m.名称, closest: "登记为已移除", missing: "想恢复要装回功能模块：" + m.实现 };
+return { asked: m.名称, closest: "已登记，实现文件在 " + m.实现, missing: "把 " + m.实现 + " 包装成唯一入口（唯一入口：调用 " + m.编号 + " 键=值）" };
+}
+
+export function 清单文本() {
+var L = ["功能模块登记表（新架构单源）：共 " + 模块.length + " 条", ""];
+L.push("  编号              状态   唯一入口");
+for (var i = 0; i < 模块.length; i++) {
+var m = 模块[i];
+L.push("  " + m.编号.padEnd(17) + String(m.状态).padEnd(6) + String(m.入口).slice(0, 54));
+}
+var n可用 = 模块.filter(function (m) { return m.状态 === 状态.可用; }).length;
+L.push("");
+L.push("  可用 " + n可用 + " / 缺件 " + (模块.length - n可用) + "（缺件 = 登记了但还没包装成唯一入口，Step 2 的活）");
+return L.join("\
+");
+}

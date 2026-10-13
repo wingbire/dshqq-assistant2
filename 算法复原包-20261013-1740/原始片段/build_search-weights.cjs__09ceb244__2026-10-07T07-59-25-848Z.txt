@@ -1,0 +1,33 @@
+# 来源会话: dsh-session-09ceb244-279e-43b3-b3d2-0228951543e5
+# 记录时间: 2026-10-07T07:59:25.848Z
+# 原始路径名: build/search-weights.cjs
+# 提取方式: 文件块(29行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 重新搜索并直接对比：内置默认 vs 本次搜出的最优（同一套 43 场景）
+const fs = require('fs');
+const ROOT = 'E:/dshQ群小助手配置端';
+async function main() {
+const mod = await import('file:///E:/dshQ群小助手配置端/src/addressee.js');
+const DEFAULT_WEIGHTS = mod.DEFAULT_WEIGHTS;
+const CORPUS = fs.readFileSync(ROOT + '/build/train/corpus-real.jsonl', 'utf8').trim().split(String.fromCharCode(10)).map(l => JSON.parse(l));
+const ALL = fs.readFileSync(ROOT + '/build/train/scenarios.jsonl', 'utf8').trim().split(String.fromCharCode(10)).map(l => JSON.parse(l));
+const GID = '255452871', NOW = 1800000000000;
+function judgeOne(W, s) {
+const ad = mod.createAddressee({ now: () => NOW, weights: W });
+for (const c of CORPUS) ad.observe(GID, { text: c.text, userId: 'corpus' });
+const botAt = NOW - Number(s.gap || 0);
+const inter = []; let clock = botAt + 1000;
+for (const it of (s.inter || [])) { ad.observe(GID, { text: it.text, userId: it.user, afterBot: true }); inter.push({ userId: it.user, text: it.text, at: clock }); clock += 1000; }
+const jr = ad.judge(GID, { text: s.msg, userId: s.user || 'u1', mentionsBot: !!s.mentionsBot, replyToBot: false,
+lastBotText: s.bot, lastBotAt: botAt, interjections: inter,
+myUnansweredQuestion: /[?？]\s*$/.test(String(s.bot || '')), recentSpeakers: Number(s.speakers || 3) });
+const d = ad.deltaForJudge(jr);
+return d.delta === null ? 'no' : (d.delta >= 2 ? 'toBot' : d.delta === 1 ? 'mid' : d.delta === 0 ? 'toNeutral' : 'neg');
+}
+function ev(W) { let hit = 0, waste = 0, miss = 0; for (const s of ALL) { const k = judgeOne(W, s); const ok = (s.expect === 'toBot') ? (k === 'toBot') : (k !== 'toBot'); if (ok) hit++; if (s.expect === 'toBot' && k !== 'toBot') miss++; if (s.expect !== 'toBot' && k === 'toBot') waste++; } return { acc: hit / ALL.length, waste: waste, miss: miss }; }
+const grid = {
+recency: [0.25, 0.3, 0.45], tone: [0.15, 0.25, 0.4], semantic: [0.15, 0.3, 0.45], behavior: [0.2, 0.3, 0.4],
+interjectPenalty: [0, 0.15, 0.3, 0.45], jointBoost: [0, 0.1], hi: [0.5, 0.6, 0.7], mid: [0.28, 0.35, 0.45], low: [0.2]
+};
+const keys = Object.keys(grid); let best = null, tried = 0;
+function rec(i, W) {

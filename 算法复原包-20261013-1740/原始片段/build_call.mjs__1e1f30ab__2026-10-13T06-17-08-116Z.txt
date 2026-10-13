@@ -1,0 +1,44 @@
+# 来源会话: dsh-session-1e1f30ab-1f08-49e8-b075-a86ac6460b77
+# 记录时间: 2026-10-13T06:17:08.116Z
+# 原始路径名: build/call.mjs
+# 提取方式: 文件块(40行,已去行号)
+# ---------- 以下为逐字内容 ----------
+// 标准调用入口（协议 ⑦三 第二件）：**先校验后执行**，超出能力报缺口。
+//
+// 用法：
+//   node build/call.mjs list                    列出登记表（哪些可用、哪些缺件）
+//   node build/call.mjs 调用 <编号> [键=值 ...]   经登记表校验后调用
+// 注意用「键=值」而不是 --键（PowerShell 会把前导 - 当参数名）。
+import { 清单文本, get, list, 缺口, 状态 } from "../src/registry.js";
+import { invoke, route, describe } from "../src/dispatch.js";
+
+const argv = process.argv.slice(2);
+const cmd = argv[0] || "list";
+function kv(rest) {
+const o = {};
+for (const a of rest) { const i = a.indexOf("="); if (i > 0) o[a.slice(0, i)] = a.slice(i + 1); }
+return o;
+}
+if (cmd === "list") {
+console.log(清单文本());
+const d = describe();
+console.log("");
+console.log("可调用：" + d.可调用.join(", "));
+console.log("缺件（已登记、待包装唯一入口）：" + d.缺件.length + " 条");
+} else if (cmd === "route") {
+const it = kv(argv.slice(1));
+const intent = {};
+for (const k of Object.keys(it)) intent[k] = (it[k] === "true" || it[k] === "1");
+console.log("归一化意图：" + JSON.stringify(intent));
+console.log("分派到：" + JSON.stringify(route(intent)));
+} else if (cmd === "调用" || cmd === "invoke") {
+const id = argv[1] || "";
+const m = get(id);
+if (!m) { console.log("缺口头报：" + JSON.stringify(缺口(id))); process.exit(2); }
+const r = invoke(id, kv(argv.slice(2)), null);
+if (r.ok) console.log("结果：" + JSON.stringify(r.结果));
+else { console.log("未执行（先校验后执行）"); console.log(JSON.stringify(r.缺口, null, 2)); process.exit(3); }
+} else {
+console.log("可用子命令：list | route | 调用 <编号> 键=值");
+process.exit(1);
+}

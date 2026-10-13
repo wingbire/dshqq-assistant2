@@ -1,0 +1,14 @@
+# 来源会话: dsh-session-9526d43e-fc0a-49d3-be09-06f41962c227
+# 记录时间: 2026-10-08T11:34:41.310Z
+# 原始路径名: gates.js
+# 提取方式: 文件块(10行,已去行号)
+# ---------- 以下为逐字内容 ----------
+   let modelRescue = false;
+       //   · 说「在对我说」→ classify.sayYesFloor（保底分）：对象分至少抬到多少（0=不抬，100=完全听它的）
+       const yesFloorRaw = Number(cfg.classify && cfg.classify.sayYesFloor);
+       //      · 模型说「不是」→ 按权重打折；· 模型说「在对我说」→ 给地板（见下面 modelRescue 的理由）；
+       modelRescue = !!(mlRelax && pSayNow !== null && pSayNow < floorYes);
+             // 模型救回时用"保底分"；纯结构延续仍用原来的常量地板
+       depthCapped = !!((modelRescue || forceByModel) && u.action === "detailed");
+       if (modelRescue) parts.push("模型救回：本地只有 " + pSayNow + " 分，按模型结论给对象分保底 " + floorYes);
+           + (modelRescue ? ("·模型救回（本地 " + pSayNow + " → 保底 " + floorYes + "）") : "")

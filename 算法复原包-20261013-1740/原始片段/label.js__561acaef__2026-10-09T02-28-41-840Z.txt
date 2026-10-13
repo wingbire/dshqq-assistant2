@@ -1,0 +1,12 @@
+# 来源会话: dsh-session-561acaef-e396-40aa-ae95-b0c411ef8346
+# 记录时间: 2026-10-09T02:28:41.840Z
+# 原始路径名: label.js
+# 提取方式: 文件块(7行,已去行号)
+# ---------- 以下为逐字内容 ----------
+ // 本页只做两件事：把待标注的判定逐条展示给人看；把人的结论写回 human-labels.jsonl。
+ var mv = it.model && it.model.verdict ? String(it.model.verdict).toUpperCase() : null;
+ function submit(human) {
+ if (human === "skip") { S.idx++; render(); return; }
+ api("POST", "/api/label", { eid: it.eid, human: human, note: note }).then(function (r) {
+ toast(human === "reply" ? "已标：应回" : (human === "ignore" ? "已标：不该回" : "已标：不确定"), "ok");
+File sandbox enforcement is partial on this host."}]

@@ -1,0 +1,52 @@
+# 来源会话: dsh-session-550e9b37-5bea-436e-8755-bea6336eb0d4
+# 记录时间: 2026-10-09T13:47:40.508Z
+# 原始路径名: panel-hardening.test.mjs
+# 提取方式: 文件块(47行)
+# ---------- 以下为逐字内容 ----------
+1| // N1-7：面板渲染的加固回归。
+2| //
+3| // 背景：架构文档一直记着「设置页点一次不渲染（约一半概率），至今未查清」。
+4| // 静态排查定位到：renderSettings 直接读 S.config / S.schema，而 boot 完成前它们是 null；
+5| // renderMain 又是「先清空 content」再调用渲染器，且没有 try/catch —— 任何一次抛异常
+6| // 都表现为整页白屏。
+7| //
+8| // 这个测试不跑浏览器（项目零依赖、没有 jsdom），而是守住修复的结构：
+9| //   · renderMain 必须把渲染包在 try/catch 里，并在失败时画出错误卡片；
+10| //   · 渲染统计必须写进 window.__dshRenderStats（供排查与后续自动化断言读取）；
+11| //   · renderSettings 不得再出现未做保护的 S.config.* / S.schema.* 取值。
+12| import test from "node:test";
+13| import assert from "node:assert/strict";
+14| import fs from "node:fs";
+15| import path from "node:path";
+16| import { fileURLToPath } from "node:url";
+17| 
+18| const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+19| const SRC = fs.readFileSync(path.join(ROOT, "public", "app.js"), "utf8");
+20| const NL = String.fromCharCode(10);
+21| 
+22| test("renderMain：渲染被 try/catch 包住，失败时画出错误卡片", () => {
+23|   const i = SRC.indexOf("function renderMain()");
+24|   assert.ok(i > 0, "找得到 renderMain");
+25|   const body = SRC.slice(i, i + 1600);
+26|   assert.match(body, /catch \(err\)/, "必须有 catch");
+27|   assert.match(body, /renderRenderError\(box, tab, err\)/, "失败时必须画错误卡片，而不是留白");
+28|   assert.ok(SRC.indexOf("function renderRenderError(") > 0, "错误卡片函数存在");
+29| });
+30| 
+31| test("renderMain：把最近一次渲染结果写进 window.__dshRenderStats", () => {
+32|   assert.match(SRC, /window\.__dshRenderStats\s*=/, "诊断字段必须存在");
+33|   const i = SRC.indexOf("function renderStat(");
+34|   assert.ok(i > 0);
+35|   const body = SRC.slice(i, i + 700);
+36|   assert.match(body, /ok: !!ok/, "要记录成功/失败");
+37|   assert.match(body, /error:/, "要记录错误信息");
+38| });
+39| 
+40| test("renderSettings：不再有未做保护的 S.config.* / S.schema.* 取值", () => {
+41|   const i = SRC.indexOf("function renderSettings(");
+42|   assert.ok(i > 0, "找得到 renderSettings");
+43|   const seg = SRC.slice(i, i + 8000);
+44|   assert.ok(seg.indexOf("S.config.") < 0, "renderSettings 里不该再直接取 S.config.*（应走 cfg 局部变量）");
+45|   assert.ok(seg.indexOf("S.schema.") < 0, "renderSettings 里不该再直接取 S.schema.*（应走 sch 局部变量）");
+46| });
+File sandbox enforcement is partial on this host."}]
