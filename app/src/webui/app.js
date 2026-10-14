@@ -16,8 +16,10 @@
     { id: "tune", name: "调整", icon: "⚙" },
     { id: "napcat", name: "接入", icon: "⇄", group: "接入" },
     { id: "profile", name: "群档案", icon: "▤" },
+    { id: "extra", name: "额外功能", icon: "✦" },
     { id: "labels", name: "标注", icon: "✎" },
-    { id: "memes", name: "图库", icon: "▣" }
+    { id: "memes", name: "图库", icon: "▣" },
+    { id: "settings", name: "设置", icon: "⚒" }
   ];
 
   /* 「调整」页：把判定 / 主动与节流 / 运行时三组按逻辑重新分类 */
@@ -34,14 +36,21 @@
       "runtime.budget.dailyTokens", "runtime.budget.groupHourlyLimit"] },
     { name: "搜索", desc: "要不要在认真回答前先搜一次", keys: [
       "runtime.search.mode"] },
-    { name: "识图", desc: "收到图片时额外调一次多模态模型，把描述拼进上下文", keys: [
-      "runtime.vision.enabled", "runtime.vision.mode", "runtime.vision.endpoint", "runtime.vision.apiKey", "runtime.vision.model"] },
-    { name: "语音", desc: "用 Windows 自带 SAPI 把文字念成 wav，走 OneBot 的 record 段发出", keys: [
-      "runtime.voice.enabled", "runtime.voice.voice", "runtime.voice.maxChars"] },
-    { name: "表情包", desc: "配图频率（详细回答一律不配图）", keys: [
-      "persona.memeFreq"] },
     { name: "权限与配置端", desc: "谁能发指令，以及配置端自己跑在哪", keys: [
       "admin.whitelist", "runtime.webui.enabled", "runtime.webui.port", "runtime.napcatWebui"] }
+  ];
+
+  /* 「额外功能」页：语音 / 图片（识图 + 表情包）—— 开关会直接改写人设 */
+  var EXTRA_GROUPS = [
+    { name: "语音", icon: "♪", desc: "用 Windows 自带 SAPI 把文字念成 wav，走 OneBot 的 record 段发出",
+      master: "runtime.voice.enabled", keys: ["runtime.voice.enabled", "runtime.voice.voice", "runtime.voice.maxChars"],
+      persona: "打开后会写进人设：允许在正文末尾写 [语音: 内容]" },
+    { name: "识图", icon: "▨", desc: "收到图片时额外调一次多模态模型，把画面内容描述拼进上下文",
+      master: "runtime.vision.enabled", keys: ["runtime.vision.enabled", "runtime.vision.mode", "runtime.vision.endpoint", "runtime.vision.apiKey", "runtime.vision.model"],
+      persona: "打开后会写进人设：你看得到群里的图" },
+    { name: "表情包", icon: "☺", desc: "配图频率（详细回答与管理指令一律不配图）",
+      master: "persona.memeFreq", masterOff: "关", keys: ["persona.memeFreq"],
+      persona: "设为「关」后人设里不再提配图，模型也就不会发 [表情: …]" }
   ];
 
   function $(sel) { return document.querySelector(sel); }
@@ -361,6 +370,73 @@
     });
   }
 
+  /* 额外功能页 */
+  function renderExtra() {
+    var head = '<div class="card"><div class="body"><div class="hint" style="margin:0">' +
+      '这里的开关不只控制程序行为，<b>还会重新生成人设</b>：关掉的功能不会出现在人设里，模型就不会去用它；打开才写进去。保存后下一轮大脑调用生效。</div></div></div>';
+    return head + EXTRA_GROUPS.map(function (g) {
+      var masterVal = getPath(S.values, g.master);
+      var on = g.masterOff ? String(masterVal) !== g.masterOff : masterVal === true;
+      var rows = g.keys.map(function (k) {
+        var f = fieldByKey(k);
+        return f ? fieldRow(f) : "";
+      }).join("");
+      return '<details class="card" open><summary>' + g.icon + ' ' + esc(g.name) +
+        '<span class="pill ' + (on ? "ok" : "warn") + '" style="margin-left:auto;font-weight:400">' + (on ? "已开启" : "已关闭") + '</span></summary>' +
+        '<div class="body"><div class="hint" style="margin:-2px 0 4px">' + esc(g.desc) + '</div>' +
+        '<div class="hint" style="margin:0 0 8px;color:var(--accent-deep)">人设影响：' + esc(g.persona) + '</div>' +
+        rows + '</div></details>';
+    }).join("");
+  }
+
+  /* 设置页：git 更新 + 依赖体检 */
+  function pageSettings() {
+    S.update = S.update || null;
+    S.deps = S.deps || null;
+    function updHtml() {
+      var u = S.update;
+      if (!u) return '<div class="muted">点「检查更新」看看仓库里有没有新版。</div>';
+      if (!u.ok && !u.isRepo) return '<div class="bad">' + esc(u.error || "不是 git 仓库") + '</div>';
+      if (!u.ok) return '<div class="bad">' + esc(u.error || "检查失败") + (u.detail ? '<pre class="pre" style="margin-top:8px">' + esc(u.detail) + '</pre>' : "") + '</div>';
+      var badge = u.upToDate ? '<span class="pill ok">已是最新</span>' : '<span class="pill warn">落后 ' + u.behind + ' 个提交</span>';
+      var list = (u.incoming || []).length ? '<details style="margin-top:8px"><summary style="cursor:pointer;font-size:12.5px;color:var(--dim)">看看这 ' + u.incoming.length + ' 个提交是什么</summary><pre class="pre" style="margin-top:6px">' + esc(u.incoming.join("\n")) + '</pre></details>' : "";
+      var warn = u.info.dirty ? '<div class="hint" style="color:var(--warn);margin-top:8px">本地有未提交改动（' + (u.info.dirtyFiles || []).length + ' 个文件），一键更新会被拒绝。先处理干净再更新。</div>' : "";
+      return '<div class="ctl-row"><span style="font-weight:600">' + esc(u.info.branch) + ' @ ' + esc(u.info.head) + '</span>' + badge +
+        '<span class="muted" style="font-size:12px">' + esc(u.info.subject) + '</span></div>' +
+        '<div class="hint" style="margin-top:6px">远端 ' + esc(u.remote + "/" + u.branch) + ' @ ' + esc(u.remoteHead || "?") + '（本地领先 ' + u.ahead + '）</div>' + warn + list;
+    }
+    function depsHtml() {
+      var d = S.deps;
+      if (!d) return '<div class="muted">点「重新检测」看看缺什么。</div>';
+      var rows = (d.items || []).map(function (it) {
+        var cls = it.ok ? "yes" : (it.required ? "no" : "grey");
+        var label = it.ok ? "就绪" : (it.required ? "缺（必需）" : "缺（可选）");
+        var btn = it.ok ? "" : '<button class="btn-sm good" data-depfix="' + esc(it.id) + '">' +
+          (it.fix && it.fix.kind === "winget" ? "一键安装" : it.fix && it.fix.kind === "url" ? "打开下载页" : "看怎么装") + '</button>';
+        return '<tr><td><b>' + esc(it.name) + '</b>' + (it.required ? ' <span class="tag no">必需</span>' : ' <span class="tag">可选</span>') + '</td>' +
+          '<td><span class="tag ' + cls + '">' + label + '</span></td>' +
+          '<td class="muted">' + esc(it.version || "—") + '</td>' +
+          '<td>' + esc(it.detail || "") + (it.fix && it.fix.note && !it.ok ? '<div class="hint" style="margin:3px 0 0">' + esc(it.fix.note) + '</div>' : "") + '</td>' +
+          '<td style="white-space:nowrap">' + btn + '</td></tr>';
+      }).join("");
+      var miss = (d.missingRequired || []).length;
+      return (miss ? '<div class="hint" style="color:var(--bad);margin-bottom:8px">还有 ' + miss + ' 项必需的没就绪，小助手现在还不能正常干活。</div>' : '<div class="hint" style="color:var(--ok);margin-bottom:8px">必需的都齐了。</div>') +
+        '<table><thead><tr><th>依赖</th><th>状态</th><th>版本</th><th>说明</th><th>操作</th></tr></thead><tbody>' + rows + '</tbody></table>' +
+        (S.depLog ? '<pre class="pre" style="margin-top:10px">' + esc(S.depLog) + '</pre>' : "");
+    }
+    return '<details class="card" open><summary>从 git 仓库更新<span class="muted" style="font-weight:400;font-size:12px;margin-left:auto">' +
+      (S.update && S.update.ok && !S.update.upToDate ? "有新版可以拉" : "一键拉取最新代码") + '</span></summary><div class="body">' +
+      '<div class="ctl-row"><button class="btn-sm" id="btn-update-check">检查更新</button>' +
+      '<button class="btn-sm good" id="btn-update-apply">一键更新</button>' +
+      '<span class="hint" style="margin:0">更新成功后要重启程序（或点托盘里的「重启」）</span></div>' +
+      '<div id="update-body" style="margin-top:10px">' + updHtml() + '</div></div></details>' +
+      '<details class="card" open><summary>依赖体检<span class="muted" style="font-weight:400;font-size:12px;margin-left:auto">运行这台机器需要什么</span></summary><div class="body">' +
+      '<div class="ctl-row"><button class="btn-sm" id="btn-deps-check">重新检测</button></div>' +
+      '<div id="deps-body" style="margin-top:10px">' + depsHtml() + '</div></div></details>' +
+      '<div class="card"><div class="body"><div class="hint" style="margin:0">说明：程序本体只依赖 Node 自带模块（零 npm 依赖）；上面列的是<b>外部</b>依赖。' +
+      '「一键安装」只走白名单动作（打开官方下载页 / winget 装 ffmpeg），不会执行任意命令。</div></div></div>';
+  }
+
   function card(k, v, s) {
     return '<div class="stat"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div><div class="s">' + esc(s || "") + '</div></div>';
   }
@@ -379,10 +455,15 @@
     else if (S.page === "tune") job = Promise.resolve(renderTune());
     else if (S.page === "persona") job = pagePersona();
     else if (S.page === "profile") job = pageProfile();
+    else if (S.page === "extra") job = Promise.resolve(renderExtra());
+    else if (S.page === "settings") job = Promise.resolve(pageSettings());
     else if (S.page === "labels") job = pageLabels();
     else if (S.page === "memes") job = pageMemes();
     else job = Promise.resolve(renderGroupFields(meta.group));
-    job.then(function (html) { $("#page").innerHTML = html; }).catch(function (e) {
+    job.then(function (html) {
+      $("#page").innerHTML = html;
+      if (S.page === "settings") loadSettings();
+    }).catch(function (e) {
       $("#page").innerHTML = '<div class="card"><div class="body">加载失败：' + esc(e.message) + '</div></div>';
     });
   }
@@ -404,6 +485,17 @@
     if (st.budget) out.push('<span class="pill">今日 ' + fmtTokens(st.budget.used) + ' / ' + fmtTokens(st.budget.limit) + '</span>');
     out.push('<span class="pill" id="pill-napcat" style="cursor:pointer" title="打开 NapCat 配置页">NapCat 配置 ↗</span>');
     return out.join("");
+  }
+
+  function loadSettings() {
+    if (!S.update && !S.updateLoading) {
+      S.updateLoading = true;
+      api("/api/update").then(function (r) { S.update = r; S.updateLoading = false; if (S.page === "settings") render(); });
+    }
+    if (!S.deps && !S.depsLoading) {
+      S.depsLoading = true;
+      api("/api/deps").then(function (r) { S.deps = r; S.depsLoading = false; if (S.page === "settings") render(); });
+    }
   }
 
   function refreshTop() {
@@ -460,6 +552,39 @@
       if (e.target.closest("#btn-budget")) {
         var rng = $("#budget-range");
         return doAction({ action: "setBudget", value: Number(rng.value) }, "日预算已改为 " + fmtTokens(rng.value));
+      }
+
+      if (e.target.closest("#btn-update-check")) {
+        toast("正在检查…");
+        return api("/api/update").then(function (r) {
+          S.update = r; render();
+          toast(r.ok ? (r.upToDate ? "已是最新" : "有 " + r.behind + " 个新提交") : (r.error || "检查失败"), !r.ok);
+        });
+      }
+      if (e.target.closest("#btn-update-apply")) {
+        if (!window.confirm("确定从远端拉取最新代码吗？\n\n更新完需要重启程序才会生效（托盘右键「重启」）。")) return;
+        toast("正在拉取…");
+        return api("/api/update", {}).then(function (r) {
+          S.update = null; S.depLog = r.log || r.error || "";
+          if (r.ok) toast(r.changed ? ("已更新到 " + r.after + "，请重启程序") : "本来就已经是最新");
+          else toast("更新失败：" + (r.error || ""), true);
+          render();
+        });
+      }
+      if (e.target.closest("#btn-deps-check")) {
+        S.deps = null; S.depLog = null; toast("正在检测…");
+        return api("/api/deps").then(function (r) { S.deps = r; render(); toast("检测完成"); });
+      }
+      var df = e.target.closest("[data-depfix]");
+      if (df) {
+        var did = df.getAttribute("data-depfix");
+        toast("正在处理…");
+        return api("/api/deps/install", { id: did }).then(function (r) {
+          if (r.open) { window.open(r.open, "_blank"); S.depLog = "已打开下载页：" + r.open + (r.note ? "\n" + r.note : ""); }
+          else S.depLog = r.output || r.error || r.note || "（没有输出）";
+          S.deps = null;
+          return api("/api/deps").then(function (d) { S.deps = d; render(); toast(r.ok ? "处理完成" : "需要手动处理", !r.ok); });
+        });
       }
 
       if (e.target.closest("#btn-save-profile") || e.target.closest("#btn-create-profile")) {

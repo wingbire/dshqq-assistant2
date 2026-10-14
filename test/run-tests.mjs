@@ -25,6 +25,8 @@ import { buildProfilePrompt } from "../app/src/profile.js";
 import { createMemeLibrary, shouldAttachMeme, scoreRow, scanPack, resolveMemeRoots, MEME_DEFAULTS } from "../app/src/meme.js";
 import { createCommands, createDefaultCommands, permLevelOf, allow } from "../app/src/commands.js";
 import { createWebUi, summarizeObservations, summarizeCost, startOfToday, DEFAULT_PORT } from "../app/src/webui.js";
+import { gitInfo, checkUpdate, applyUpdate, createDepsProbe, runDepFix } from "../app/src/update.js";
+import { personaFromConfig } from "../app/src/dshprofile.js";
 import { createVision, isImageSegment, imageSegmentsOf, mimeOf, resolveLocalImage, buildHttpBody, parseHttpAnswer, injectVision, VISION_DEFAULTS, VISION_PROFILE_ID } from "../app/src/vision.js";
 import { createTts, parseVoiceTag, buildSapiScript, TTS_DEFAULTS } from "../app/src/tts.js";
 import fs from "node:fs";
@@ -1756,6 +1758,173 @@ t("brain: 手写的全局人设整段覆盖字段拼装", function () {
   });
   const patch2 = JSON.parse(fs.readFileSync(r2.patch, "utf8"));
   ok(patch2[0].config.personaPrefix.indexOf("小肥鱼") >= 0, "不写全局人设时回到字段拼装");
+});
+
+// ===== 设置页：git 更新 / 依赖体检 / 额外功能开关改人设 =====
+
+// 假 git：按命令返回不同结果，完全不碰真仓库
+function fakeGit(opts) {
+  const o = opts || {};
+  let pulled = false;
+  return function (args) {
+    const a = args.join(" ");
+    if (a.indexOf("rev-parse --is-inside-work-tree") >= 0) return { status: o.repo === false ? 128 : 0, stdout: o.repo === false ? "" : "true" };
+    if (a.indexOf("rev-parse --abbrev-ref") >= 0) return { status: 0, stdout: "main\n" };
+    if (a.indexOf("rev-parse --short HEAD") >= 0) return { status: 0, stdout: ((pulled && o.headAfter) ? o.headAfter : (o.head || "abc1234")) + "\n" };
+    if (a.indexOf("log -1 --pretty=%s") >= 0) return { status: 0, stdout: "某次提交\n" };
+    if (a.indexOf("log -1 --pretty=%ci") >= 0) return { status: 0, stdout: "2026-10-14\n" };
+    if (a.indexOf("status --porcelain") >= 0) return { status: 0, stdout: o.dirty ? " M app/main.js\n" : "" };
+    if (a.indexOf("fetch --prune") >= 0) return o.offline ? { status: 1, stderr: "could not resolve host" } : { status: 0, stdout: "" };
+    if (a.indexOf("rev-list --left-right --count") >= 0) return { status: 0, stdout: (o.ahead || 0) + "\t" + (o.behind || 0) + "\n" };
+    if (a.indexOf("log --oneline --no-decorate HEAD..") >= 0) return { status: 0, stdout: (o.incoming || []).join("\n") };
+    if (a.indexOf("rev-parse --short origin/main") >= 0) return { status: 0, stdout: "def5678\n" };
+    if (a.indexOf("pull --ff-only") >= 0) { if (o.pullFail) return { status: 1, stderr: "conflict" }; pulled = true; return { status: 0, stdout: "Updating abc1234..def5678\n" }; }
+    if (a.indexOf("--version") >= 0) return { status: 0, stdout: "git version 2.54.0\n" };
+    return { status: 1, stdout: "", stderr: "unknown: " + a };
+  };
+}
+
+t("update: 不是 git 仓库时明确报出来", function () {
+  const root = "C:/nope";
+  const info = gitInfo(root, { run: fakeGit({ repo: false }) });
+  eq(info.isRepo, false);
+  const c = checkUpdate(root, { run: fakeGit({ repo: false }) });
+  eq(c.ok, false);
+  ok(String(c.error).indexOf("分发版") >= 0, "要提示分发版手动更新");
+});
+
+t("update: 落后 N 个提交能看出来，且带到哪些提交", function () {
+  const run = fakeGit({ behind: 3, incoming: ["aaa 新功能", "bbb 修 bug", "ccc 文档"] });
+  const c = checkUpdate("C:/repo", { run: run });
+  eq(c.ok, true);
+  eq(c.behind, 3);
+  eq(c.upToDate, false);
+  eq(c.incoming.length, 3);
+  eq(c.remoteHead, "def5678");
+  eq(c.canFastForward, true);
+});
+
+t("update: 本地有未提交改动就不许快进", function () {
+  const c = checkUpdate("C:/repo", { run: fakeGit({ behind: 1, dirty: true }) });
+  eq(c.info.dirty, true);
+  eq(c.canFastForward, false);
+  const a = applyUpdate("C:/repo", { run: fakeGit({ behind: 1, dirty: true }) });
+  eq(a.ok, false);
+  ok(String(a.error).indexOf("未提交") >= 0);
+});
+
+t("update: 离线时报错不炸", function () {
+  const c = checkUpdate("C:/repo", { run: fakeGit({ offline: true }) });
+  eq(c.ok, false);
+  ok(String(c.error).indexOf("连不上") >= 0);
+});
+
+t("update: 一键更新成功后提示重启", function () {
+  const a = applyUpdate("C:/repo", { run: fakeGit({ behind: 2, headAfter: "def5678" }) });
+  eq(a.ok, true);
+  eq(a.before, "abc1234");
+  eq(a.after, "def5678");
+  eq(a.changed, true);
+  eq(a.needRestart, true);
+  const same = applyUpdate("C:/repo", { run: fakeGit({ behind: 0 }) });
+  eq(same.changed, false, "本来就没变就不提示重启");
+  eq(same.needRestart, false);
+});
+
+t("deps: 依赖体检列出必需项并标出缺失", function () {
+  const run = function (args) {
+    if (args[0] === "git") return { status: 0, stdout: "git version 2.54.0\n" };
+    if (args[0] === "where") return { status: 1, stdout: "" };
+    if (args[0] === "powershell") return { status: 0, stdout: "4\n" };
+    return { status: 1 };
+  };
+  const p = createDepsProbe({ run: run, dshCli: null, onebotState: function () { return "closed"; }, hasApiKey: function () { return true; }, requireFn: function () { return {}; }, qqPaths: ["C:/nope/QQ.exe"] });
+  const d = p.probe();
+  eq(d.ok, true);
+  eq(d.items.length, 9);
+  const by = {}; d.items.forEach(function (x) { by[x.id] = x; });
+  eq(by.node.ok, true, "当前 Node 版本应满足");
+  eq(by.dsh.ok, false, "没给 dsh 路径就是缺");
+  eq(by.apikey.ok, true);
+  eq(by.napcat.ok, false);
+  eq(by.sapi.ok, true);
+  eq(by.sapi.version, "4 个音色");
+  eq(by.ffmpeg.ok, false);
+  eq(by.git.ok, true);
+  eq(d.missingRequired.indexOf("dsh") >= 0, true);
+  eq(d.missingRequired.indexOf("apikey"), -1);
+  // 20 秒缓存：第二次探测不应再跑命令
+  let calls = 0;
+  const p2 = createDepsProbe({ run: function (a) { calls += 1; return { status: 1 }; }, dshCli: "x", onebotState: function () { return "open"; }, hasApiKey: function () { return true; } });
+  p2.probe(); const n1 = calls; p2.probe();
+  eq(calls, n1, "缓存期内不再重复探测");
+});
+
+t("deps: 一键安装只走白名单（url 打开 / winget 执行）", function () {
+  const urlDep = { id: "napcat", fix: { kind: "url", value: "https://example.com/napcat" } };
+  const r1 = runDepFix(urlDep, {});
+  eq(r1.ok, true);
+  eq(r1.open, "https://example.com/napcat");
+
+  const manual = { id: "sapi", fix: { kind: "manual", value: "去设置里装语音包" } };
+  const r2 = runDepFix(manual, {});
+  eq(r2.ok, false);
+  eq(r2.manual, true);
+
+  const calls = [];
+  const winget = { id: "ffmpeg", fix: { kind: "winget", value: "Gyan.FFmpeg" } };
+  const r3 = runDepFix(winget, { run: function (args) { calls.push(args); return { status: 0, stdout: "Successfully installed" }; } });
+  eq(r3.ok, true);
+  eq(calls[0][0], "winget");
+  eq(calls[0].indexOf("Gyan.FFmpeg") >= 0, true);
+  eq(calls[0].indexOf("--accept-package-agreements") >= 0, true);
+  eq(runDepFix({ id: "x", fix: { kind: "rm -rf" } }, {}).ok, false, "未知方式必须拒绝");
+});
+
+t("webui: 设置页两个接口能通", async function () {
+  const table = loadFieldTable();
+  const cfg = defaultsFromTable(table);
+  const ui = createWebUi({
+    config: cfg, table: table,
+    checkUpdate: async function () { return { ok: true, isRepo: true, behind: 2, upToDate: false, info: { head: "abc1234", branch: "main", subject: "x", dirty: false }, incoming: ["a", "b"] }; },
+    applyUpdate: async function () { return { ok: true, changed: true, before: "abc", after: "def", needRestart: true }; },
+    depsProbe: async function () { return { ok: true, items: [{ id: "node", name: "Node.js", required: true, ok: true }], missingRequired: [] }; },
+    depFix: async function (id) { return { ok: true, open: "https://x/" + id }; }
+  });
+  const info = await ui.listen(0);
+  try {
+    const u = await (await fetch(info.url + "/api/update")).json();
+    eq(u.ok, true); eq(u.behind, 2);
+    const a = await (await fetch(info.url + "/api/update", { method: "POST" })).json();
+    eq(a.after, "def");
+    const d = await (await fetch(info.url + "/api/deps")).json();
+    eq(d.items.length, 1);
+    const f = await (await fetch(info.url + "/api/deps/install", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ id: "napcat" }) })).json();
+    eq(f.open, "https://x/napcat");
+    const bad = await fetch(info.url + "/api/deps/install", { method: "POST", headers: { "content-type": "application/json" }, body: "{}" });
+    eq(bad.status, 400);
+  } finally { await ui.close(); }
+});
+
+t("dshprofile: 额外功能开关会改写人设", function () {
+  const off = personaFromConfig({ persona: { memeFreq: "关", botName: "小肥鱼" }, runtime: { voice: { enabled: false }, vision: { enabled: false } } });
+  const t1 = buildPersonaText(off);
+  eq(t1.indexOf("【表情包】"), -1, "关掉表情包后人设里不该再提配图");
+  eq(t1.indexOf("【语音】"), -1);
+  eq(t1.indexOf("【看图】"), -1);
+  ok(t1.indexOf("只能发文字") >= 0, "全关时要明确告诉它只能发文字");
+
+  const on = personaFromConfig({ persona: { memeFreq: "中" }, runtime: { voice: { enabled: true, maxChars: 50 }, vision: { enabled: true, mode: "http" } } });
+  const t2 = buildPersonaText(on);
+  ok(t2.indexOf("【表情包】") >= 0);
+  ok(t2.indexOf("【语音】") >= 0);
+  ok(t2.indexOf("不超过 50 个字") >= 0);
+  ok(t2.indexOf("【看图】") >= 0);
+  ok(t2.indexOf("只能发文字") < 0);
+
+  const vOnly = personaFromConfig({ persona: { memeFreq: "关" }, runtime: { vision: { enabled: true, mode: "dsh" } } });
+  ok(buildPersonaText(vOnly).indexOf("【看图】") >= 0);
+  eq(buildPersonaText(personaFromConfig({ persona: { memeFreq: "关" }, runtime: { vision: { enabled: true, mode: "off" } } })).indexOf("【看图】"), -1, "mode=off 时即使 enabled 也不算开");
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===

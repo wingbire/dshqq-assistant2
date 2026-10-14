@@ -122,6 +122,10 @@ export function createWebUi(deps) {
   const configFile = d.configFile;
   const labels = d.labels || (store ? createLabelQueue({ store: store }) : null);
   const onConfigSaved = d.onConfigSaved || null;  // async (nextCfg) => void —— 人设改了要重渲染 profile patch
+  const checkUpdateFn = d.checkUpdate || null;    // async () => 更新检查结果
+  const applyUpdateFn = d.applyUpdate || null;    // async () => 执行更新
+  const depsProbeFn = d.depsProbe || null;        // async () => { items: [...] }
+  const depFixFn = d.depFix || null;              // async (id) => { ok, open?, output? }
   const probeOnebot = d.probeOnebot || null;      // async (force) => { state, selfId, online, version, nickname }
   const listGroups = d.listGroups || null;        // async () => [{ group_id, group_name, member_count }]
   const startedAt = Date.now();
@@ -227,6 +231,23 @@ export function createWebUi(deps) {
         return sendJson(res, 200, { ok: true, action: act, dailyTokens: v });
       }
       return sendJson(res, 400, { ok: false, error: "未知动作：" + act });
+    }
+
+    // 设置页：git 更新 + 依赖体检
+    if (p === "/api/update") {
+      if (req.method === "GET") return sendJson(res, 200, checkUpdateFn ? await checkUpdateFn() : { ok: false, error: "没有接更新服务" });
+      if (req.method === "POST") return sendJson(res, 200, applyUpdateFn ? await applyUpdateFn() : { ok: false, error: "没有接更新服务" });
+      return sendJson(res, 405, { ok: false, error: "不支持的方法" });
+    }
+    if (p === "/api/deps" && req.method === "GET") {
+      return sendJson(res, 200, depsProbeFn ? await depsProbeFn() : { ok: false, items: [] });
+    }
+    if (p === "/api/deps/install" && req.method === "POST") {
+      const body = await readBody(req);
+      let b = null;
+      try { b = JSON.parse(body); } catch (e) { return sendJson(res, 400, { ok: false, error: "JSON 解析失败" }); }
+      if (!b || !b.id) return sendJson(res, 400, { ok: false, error: "缺少 id" });
+      return sendJson(res, 200, depFixFn ? await depFixFn(String(b.id)) : { ok: false, error: "没有接依赖服务" });
     }
 
     // 群档案：管理员可以直接改提炼结果，也可以写本群专属人设

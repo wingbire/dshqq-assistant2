@@ -14,7 +14,12 @@ import { createMemeLibrary } from "./src/meme.js";
 import { createWebUi } from "./src/webui.js";
 import { createVision, VISION_PERSONA } from "./src/vision.js";
 import { createTts } from "./src/tts.js";
-import { CONFIG_FILE, DATA_ROOT, BRAIN_TMP_DIR } from "./src/paths.js";
+import { CONFIG_FILE, DATA_ROOT, BRAIN_TMP_DIR, WORKSPACE_ROOT } from "./src/paths.js";
+import { pickApiKey } from "./src/secrets.js";
+import { checkUpdate, applyUpdate, createDepsProbe, runDepFix } from "./src/update.js";
+import { createRequire } from "node:module";
+
+const _require = createRequire(import.meta.url);
 
 const args = process.argv.slice(2);
 const selftest = args.includes("--selftest");
@@ -148,9 +153,35 @@ async function onConfigSaved(next) {
   return { ok: true, source: text ? "手写的全局人设" : "按字段拼装", patch: r.patch, bytes: text ? text.length : undefined };
 }
 
+// 设置页：git 更新 + 依赖体检（依赖探测里有些要起进程，内部有 20 秒缓存）
+const depsProbe = createDepsProbe({
+  dshCli: cli,
+  onebotState: function () { return ob.state(); },
+  hasApiKey: function () { return !!pickApiKey(); },
+  requireFn: _require,
+  qqPaths: cfg && cfg.runtime && cfg.runtime.qqPaths ? cfg.runtime.qqPaths : undefined
+});
+async function doCheckUpdate() {
+  try { return checkUpdate(WORKSPACE_ROOT); } catch (e) { return { ok: false, error: String(e && e.message) }; }
+}
+async function doApplyUpdate() {
+  try { return applyUpdate(WORKSPACE_ROOT); } catch (e) { return { ok: false, error: String(e && e.message) }; }
+}
+let depFixLock = false;
+async function doDepFix(id) {
+  if (depFixLock) return { ok: false, error: "上一个安装还没结束" };
+  const probe = depsProbe.probe();
+  const dep = (probe.items || []).filter(function (x) { return x.id === id; })[0];
+  if (!dep) return { ok: false, error: "未知依赖：" + id };
+  depFixLock = true;
+  try { return runDepFix(dep); }
+  finally { depFixLock = false; depsProbe.reset(); }
+}
+
 const webui = createWebUi({
   config: cfg, table: table, store: store, memes: memes, runtime: runtime, labels: runtime.labels,
-  configFile: CONFIG_FILE, probeOnebot: probeOnebot, listGroups: listGroups, onConfigSaved: onConfigSaved
+  configFile: CONFIG_FILE, probeOnebot: probeOnebot, listGroups: listGroups, onConfigSaved: onConfigSaved,
+  checkUpdate: doCheckUpdate, applyUpdate: doApplyUpdate, depsProbe: async function () { return depsProbe.probe(); }, depFix: doDepFix
 });
 
 if (selftest) {
