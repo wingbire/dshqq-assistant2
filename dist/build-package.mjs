@@ -1,7 +1,7 @@
 // P6：分发版打包（N27 决策 + §12 要求）
 // 白名单打包 —— 只复制明确列出的东西，其余一律不进包。
 // 硬要求：不含任何密钥、不含图库素材（dsh-meme 内置包 license=personal 不可再分发）、
-//        不含开发者私史（算法复原包）、不含运行期数据。
+//        不含开发者私有资料、不含运行期数据。
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -27,12 +27,14 @@ export const WHITELIST = [
   { from: "demo/run-brain-mock.mjs" },
   { from: "demo/run-acceptance.mjs" },
   { from: "demo/import-key.mjs" },
-  { from: "dist/INSTALL.md", to: "INSTALL.md" },
-  { from: "dist/隐私说明.md", to: "隐私说明.md" },
-  { from: "dist/首次运行.txt", to: "首次运行.txt" },
-  { from: "技术架构文档.md" },
-  { from: "存储契约.md" },
-  { from: "待补清单.md" }
+  { from: "README.md" },
+  { from: "LICENSE" },
+  { from: "docs/INSTALL.md", to: "INSTALL.md" },
+  { from: "docs/PRIVACY.md", to: "隐私说明.md" },
+  { from: "docs/ARCHITECTURE.md" },
+  { from: "docs/DESIGN.md" },
+  { from: "docs/ROADMAP.md" },
+  { from: "dist/首次运行.txt", to: "首次运行.txt" }
 ];
 
 // 两类闸门：
@@ -41,6 +43,7 @@ export const WHITELIST = [
 export const FORBIDDEN_PATH = [
   { re: /(^|\/)secrets\.json$/i, why: "凭据文件" },
   { re: /算法复原包/, why: "开发者私史（史料）" },
+  { re: /(^|\/)(交接|残留清理|设计节点|新工作区)/, why: "内部交接/运维笔记" },
   { re: /dafeiyu/i, why: "dsh-meme 内置图库素材（license=personal，不可再分发）" },
   { re: /(^|\/)dsh-data\//, why: "运行期数据" },
   { re: /(^|\/)dsh-home\//, why: "大脑 profile 运行期状态" },

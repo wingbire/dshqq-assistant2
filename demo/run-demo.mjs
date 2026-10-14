@@ -41,7 +41,7 @@ for (const item of STREAM) {
   i += 1;
   const now = T0 + i * 60000;
   const evt = {
-    gid: "255452871", uid: "u" + i, text: item.t, atBot: !!item.atBot, replyToBot: false,
+    gid: "123456789", uid: "u" + i, text: item.t, atBot: !!item.atBot, replyToBot: false,
     botNames: BOT_NAMES, nicknames: NICKS, groupNames: GROUP_NAMES,
     lastBotText: "上次说的是第五层那个 boss 的打法", lastBotAt: now - item.gap * 1000, now: now
   };
@@ -92,6 +92,6 @@ bot.saveState();
 console.log("");
 console.log("=== 落盘 ===");
 console.log("反馈：" + bot.store.paths.feedback);
-console.log("档案：" + path.join(bot.store.paths.profiles, "g-255452871.json"));
+console.log("档案：" + path.join(bot.store.paths.profiles, "g-123456789.json"));
 const st = bot.stats();
 console.log("bandit 后验：" + JSON.stringify(st.bandit).slice(0, 220));

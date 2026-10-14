@@ -40,7 +40,7 @@ const rtl = createRuntime({
   now: function () { return clock; }, sleep: async function () {}, sendGapMs: 0
 });
 
-const G = "255452871";          // 学习用的群
+const G = "123456789";          // 学习用的群
 const G2 = "111222333";         // 观察期攒样本的群
 
 async function say(rtx, evt, at) { clock = at; await rtx.onEvent(evt); }

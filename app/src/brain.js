@@ -66,7 +66,7 @@ export function resolveDshCli(env) {
   const local = e.LOCALAPPDATA ? path.join(e.LOCALAPPDATA, "Programs") : null;
   if (local) cands.push(path.join(local, "DeepSeekHarness", "resources", "runtime", "cli", "bin", "dsh.cmd"));
   if (e.ProgramFiles) cands.push(path.join(e.ProgramFiles, "DeepSeek Harness", "resources", "runtime", "cli", "bin", "dsh.cmd"));
-  cands.push("E:\\DeepseekHarness\\resources\\runtime\\cli\\bin\\dsh.cmd");
+  // 装到别的盘（D:\E:\ 之类）时，用 DSHQQ_DSH_CLI 或 PATH 指定即可，别写死机器路径
   for (const c of cands) {
     try { if (c && fs.existsSync(c) && fs.statSync(c).isFile()) return c; } catch (err) {}
   }

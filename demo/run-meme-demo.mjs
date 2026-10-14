@@ -28,7 +28,7 @@ console.log("  位置：" + lib.packDir);
 console.log("  张数：" + lib.rows.length + "  情绪标签 " + lib.tags().length + " 个：" + lib.tags().slice(0, 8).join("/") + "…");
 check("图库可用", lib.ready === true, "rows=" + lib.rows.length);
 
-const GID = "255452871";
+const GID = "123456789";
 const srv = createMockOneBotServer({ token: "t", selfId: 999 });
 const port = await srv.listen(0);
 let handler = function () {};

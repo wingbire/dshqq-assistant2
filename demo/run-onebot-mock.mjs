@@ -23,7 +23,7 @@ async function drive(rt, ms, step) {
   while (Date.now() - t0 < ms) { await rt.tick(); await wait(step || 60); }
 }
 
-const GID = "255452871";
+const GID = "123456789";
 const srv = createMockOneBotServer({ token: "testtoken", selfId: 999 });
 const port = await srv.listen(0);
 console.log("=== mock OneBot 服务器 ===");

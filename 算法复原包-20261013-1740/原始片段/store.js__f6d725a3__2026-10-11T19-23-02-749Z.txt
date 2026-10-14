@@ -1,9 +1,0 @@
-# 来源会话: dsh-session-f6d725a3-f6dd-407e-bba8-b189127a0c85
-# 记录时间: 2026-10-11T19:23:02.749Z
-# 原始路径名: store.js
-# 提取方式: 文件块(5行,已去行号)
-# ---------- 以下为逐字内容 ----------
- import { applyBand, AUTOJOIN_KEYS, cleanKeywords } from "./profile.js";
- // 只看 data/ 这一层（不含 dsh-home / browser-profile），那才是本程序自己写的。
- // 只做浅合并，键与取值的安全性由 profile.js 的 clampParams 保证。
- // 【按群话题词（2026-10-08）】由「提炼群档案」写入（profile.keywords），这里并进 autoJoin。

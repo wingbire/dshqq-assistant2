@@ -141,8 +141,8 @@ t("store: 群档案读写", function () {
   fs.mkdirSync(BASE2, { recursive: true });
   const dir = fs.mkdtempSync(path.join(BASE2, "b-"));
   const s = createStore(dir, {});
-  s.saveProfile("255452871", { interests: ["开黑"] });
-  eq(s.loadProfile("255452871").interests, ["开黑"]);
+  s.saveProfile("123456789", { interests: ["开黑"] });
+  eq(s.loadProfile("123456789").interests, ["开黑"]);
 });
 
 t("addressee: @ 提升置信度", function () {
@@ -499,12 +499,12 @@ t("brakes: isAdmin 认群主/管理/白名单", function () {
 
 t("onebot: 归一化群消息，识别 @我 与 @全体", function () {
   const raw = {
-    post_type: "message", message_type: "group", group_id: 255452871, user_id: 1001, self_id: 999,
+    post_type: "message", message_type: "group", group_id: 123456789, user_id: 1001, self_id: 999,
     message_id: 7, sender: { nickname: "甲", role: "member" },
     message: [{ type: "at", data: { qq: "999" } }, { type: "text", data: { text: " 在吗" } }, { type: "at", data: { qq: "all" } }]
   };
   const e = normalizeEvent(raw, { selfId: "999", sentIds: new Set(), now: 5 });
-  eq(e.gid, "255452871");
+  eq(e.gid, "123456789");
   eq(e.uid, "1001");
   eq(e.text, "在吗");
   eq(e.atBot, true);
@@ -1226,7 +1226,7 @@ t("onebot: 发图走 image 段", function () {
   const sock = { send: function (s) { sent.push(JSON.parse(s)); }, close: function () {} };
   const ob = createOneBot({ url: "ws://x", transport: function () { return sock; }, now: function () { return 0; } });
   ob.connect(); sock.onopen();
-  ob.sendGroupImage("255452871", "C:\\a\\b\\wuyu.jpg");
+  ob.sendGroupImage("123456789", "C:\\a\\b\\wuyu.jpg");
   eq(sent[0].action, "send_group_msg");
   eq(Array.isArray(sent[0].params.message), true);
   eq(sent[0].params.message[0].type, "image");

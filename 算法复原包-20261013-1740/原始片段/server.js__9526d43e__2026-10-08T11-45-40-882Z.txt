@@ -1,9 +1,0 @@
-# 来源会话: dsh-session-9526d43e-fc0a-49d3-be09-06f41962c227
-# 记录时间: 2026-10-08T11:45:40.882Z
-# 原始路径名: server.js
-# 提取方式: 文件块(5行,已去行号)
-# ---------- 以下为逐字内容 ----------
-   if (p === "/api/events" && req.method === "GET") {
-     return sendJson(res, 200, { ok: true, events: ctx.getEvents() });
-   if (p === "/api/events" && req.method === "DELETE") {
-     ctx.clearEvents();

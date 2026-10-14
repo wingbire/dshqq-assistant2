@@ -45,7 +45,7 @@ const vision = createVision({
 });
 const tts = createTts({ config: { enabled: true, voice: "Microsoft Huihui", maxChars: 60 }, outDir: path.join(DATA, "voice") });
 
-const GID = "255452871";
+const GID = "123456789";
 const srv = createMockOneBotServer({ token: "t", selfId: 999 });
 const port = await srv.listen(0);
 let handler = function () {};

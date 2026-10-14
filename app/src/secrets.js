@@ -3,7 +3,7 @@ import path from "node:path";
 import os from "node:os";
 import { SECRETS_FILE, CONFIG_DIR, ensureDir } from "./paths.js";
 
-// 工作区自持密钥。设计对齐原版 src/secrets.js（史料 算法复原包/原始片段/src_secrets.js__*）。
+// 工作区自持密钥：只读写 <项目>/app/dsh-data/config/secrets.json，不碰 ~/.dsh。
 // 硬规则：
 //   1) 密钥只落 <工作区>/app/dsh-data/config/secrets.json（已被 .gitignore 挡住）
 //   2) 任何日志/返回值都不得出现明文密钥，只允许 maskKey() 的输出

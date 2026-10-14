@@ -5,9 +5,8 @@ import { depthPolicy, buildPersonaText, buildTaskText, runBrain, cacheHitRate } 
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const MOCK = path.join(HERE, "mock-dsh-cli.mjs");
-const CAND = [process.env.MOCK_NODE,
-  "C:/Users/13518/.dsh/dsh-runtimes/dsh-primary-runtime/dependencies/node/bin/node.exe",
-  process.execPath];
+// 优先用环境变量指定的 node（本地 DSH 运行时自带的那个），否则用当前这个
+const CAND = [process.env.MOCK_NODE, process.execPath];
 let EXE = process.execPath;
 for (const c of CAND) {
   if (!c) continue;
