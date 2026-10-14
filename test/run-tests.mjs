@@ -27,6 +27,7 @@ import { createCommands, createDefaultCommands, permLevelOf, allow } from "../ap
 import { createWebUi, summarizeObservations, summarizeCost, startOfToday, DEFAULT_PORT } from "../app/src/webui.js";
 import { gitInfo, checkUpdate, applyUpdate, createDepsProbe, runDepFix } from "../app/src/update.js";
 import { personaFromConfig } from "../app/src/dshprofile.js";
+import { createMockOneBotServer } from "../app/src/mock-onebot-server.js";
 import { createVision, isImageSegment, imageSegmentsOf, mimeOf, resolveLocalImage, buildHttpBody, parseHttpAnswer, injectVision, VISION_DEFAULTS, VISION_PROFILE_ID } from "../app/src/vision.js";
 import { createTts, parseVoiceTag, buildSapiScript, TTS_DEFAULTS } from "../app/src/tts.js";
 import fs from "node:fs";
@@ -1925,6 +1926,53 @@ t("dshprofile: 额外功能开关会改写人设", function () {
   const vOnly = personaFromConfig({ persona: { memeFreq: "关" }, runtime: { vision: { enabled: true, mode: "dsh" } } });
   ok(buildPersonaText(vOnly).indexOf("【看图】") >= 0);
   eq(buildPersonaText(personaFromConfig({ persona: { memeFreq: "关" }, runtime: { vision: { enabled: true, mode: "off" } } })).indexOf("【看图】"), -1, "mode=off 时即使 enabled 也不算开");
+});
+
+t("onebot: token 不对会被服务端拒绝，并记下原因（不再是哑巴 closed）", async function () {
+  const srv = createMockOneBotServer({ token: "righttoken", selfId: 999 });
+  const port = await srv.listen(0);
+  try {
+    const bad = createOneBot({ url: "ws://127.0.0.1:" + port, token: "wrong", reconnectMs: 999999 });
+    let rejected = null;
+    bad.connect();
+    await new Promise(function (r) { setTimeout(r, 600); });
+    eq(bad.state(), "rejected", "应当是 rejected 而不是 open/closed");
+    rejected = bad.lastMessage();
+    ok(rejected && rejected.retcode === 1403, "要抓到 retcode 1403，实得 " + JSON.stringify(rejected));
+    ok(String(rejected.message).length > 0, "要带上服务端说的话");
+    eq(bad.url(), "ws://127.0.0.1:" + port, "要能说出自己连的是哪个地址");
+    bad.close();
+
+    const good = createOneBot({ url: "ws://127.0.0.1:" + port, token: "righttoken", reconnectMs: 999999 });
+    good.connect();
+    await new Promise(function (r) { setTimeout(r, 600); });
+    eq(good.state(), "open");
+    eq(good.tokenSet(), true);
+    eq(good.lastMessage(), null, "连上之后不该再有被拒记录");
+    good.close();
+  } finally { await srv.close(); }
+});
+
+t("webui: 重连动作能通（改完接入设置不用重启）", async function () {
+  const table = loadFieldTable();
+  const cfg = defaultsFromTable(table);
+  let called = 0;
+  const ui = createWebUi({
+    config: cfg, table: table,
+    reconnect: async function () { called += 1; return { url: "ws://127.0.0.1:3001", tokenSet: true, state: "connecting" }; }
+  });
+  const info = await ui.listen(0);
+  try {
+    const r = await (await fetch(info.url + "/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reconnect" }) })).json();
+    eq(r.ok, true);
+    eq(r.url, "ws://127.0.0.1:3001");
+    eq(called, 1);
+    const ui2 = createWebUi({ config: cfg, table: table });
+    const info2 = await ui2.listen(0);
+    const r2 = await fetch(info2.url + "/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "reconnect" }) });
+    eq(r2.status, 500, "没接重连服务时要明确报错");
+    await ui2.close();
+  } finally { await ui.close(); }
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===

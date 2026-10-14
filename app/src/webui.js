@@ -126,6 +126,7 @@ export function createWebUi(deps) {
   const applyUpdateFn = d.applyUpdate || null;    // async () => 执行更新
   const depsProbeFn = d.depsProbe || null;        // async () => { items: [...] }
   const depFixFn = d.depFix || null;              // async (id) => { ok, open?, output? }
+  const reconnectFn = d.reconnect || null;        // async () => { ok, url, state } —— 接入设置改完不用重启
   const probeOnebot = d.probeOnebot || null;      // async (force) => { state, selfId, online, version, nickname }
   const listGroups = d.listGroups || null;        // async () => [{ group_id, group_name, member_count }]
   const startedAt = Date.now();
@@ -222,6 +223,11 @@ export function createWebUi(deps) {
         cfg.paused = v;
         if (configFile) { try { saveConfig(cfg, configFile); } catch (e) {} }
         return sendJson(res, 200, { ok: true, action: act, paused: v });
+      }
+      if (act === "reconnect") {
+        if (!reconnectFn) return sendJson(res, 500, { ok: false, error: "没有接重连服务" });
+        const r = await reconnectFn();
+        return sendJson(res, 200, Object.assign({ ok: true, action: act }, r || {}));
       }
       if (act === "setBudget") {
         const v = Math.max(0, Math.round(Number(b.value) || 0));

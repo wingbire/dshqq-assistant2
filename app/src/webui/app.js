@@ -437,6 +437,32 @@
       '「一键安装」只走白名单动作（打开官方下载页 / winget 装 ffmpeg），不会执行任意命令。</div></div></div>';
   }
 
+  /* 接入页：先看连接状态，再改参数 */
+  function pageNapcat() {
+    var ob = S.onebot || {};
+    var stText = { idle: "未连接", connecting: "连接中", open: "已连接", closed: "已断开", reconnecting: "重连中", error: "连接出错", rejected: "被服务端拒绝", stopped: "已停止", unknown: "未知" };
+    var cls = ob.state === "open" ? "ok" : (ob.state === "connecting" || ob.state === "reconnecting" ? "warn" : "bad");
+    var mismatch = !!(ob.url && ob.savedUrl && ob.url !== ob.savedUrl);
+    var tokenMismatch = !!(ob.tokenSet !== ob.savedTokenSet);
+    var status = '<div class="card"><div class="head">OneBot / NapCat 连接' +
+      '<span class="pill ' + cls + '" style="font-weight:400">' + esc(stText[ob.state] || ob.state || "未知") + '</span></div><div class="body">' +
+      '<div class="field"><div class="label">正在连的地址</div><div class="ctrl"><code>' + esc(ob.url || "（还没连）") + '</code></div></div>' +
+      '<div class="field"><div class="label">配置里保存的地址</div><div class="ctrl"><code>' + esc(ob.savedUrl || "—") + '</code></div></div>' +
+      '<div class="field"><div class="label">Token</div><div class="hint">NapCat 的 WebSocket 服务端那一栏</div><div class="ctrl">' +
+        '<span class="tag ' + (ob.tokenSet ? "yes" : "grey") + '">' + (ob.tokenSet ? "运行中：已带 token" : "运行中：无 token") + '</span>' +
+        '<span class="tag ' + (ob.savedTokenSet ? "yes" : "grey") + '">' + (ob.savedTokenSet ? "配置：已设置" : "配置：空") + '</span></div></div>' +
+      (ob.error ? '<div class="hint" style="color:var(--bad)">服务端回话：' + esc(ob.error) + '</div>' : "") +
+      ((mismatch || tokenMismatch) ? '<div class="hint" style="color:var(--warn)">运行中的客户端还在用旧设置 —— 点下面的「重连」立刻生效，不用重启程序</div>' : "") +
+      (ob.state === "open" ? '<div class="hint" style="color:var(--ok)">已连上' + (ob.nickname ? "：" + esc(ob.nickname) + "(" + esc(ob.selfId) + ")" : "") + (ob.version ? "　" + esc(ob.version) : "") + '</div>' : "") +
+      (!ob.url ? '<div class="hint">还没连接过 —— 先填好下面的地址，再点「重连」。</div>' : "") +
+      '<div class="ctl-row" style="margin-top:10px"><button class="btn-sm good" id="btn-reconnect">重连 OneBot</button>' +
+      '<button class="btn-sm" id="btn-napcat">打开 NapCat 配置页</button>' +
+      '<span class="hint" style="margin:0">NapCat 的 OneBot 端口常见是 <code>3001</code>；<code>6099</code> 是它的网页控制台，不是这个</span></div>' +
+      '</div></div>';
+    return status + '<details class="card" open><summary>接入参数<span class="muted" style="font-weight:400;font-size:12px;margin-left:auto">改完点保存（接入类会自动重连）</span></summary><div class="body">' +
+      renderGroupFields("接入") + '</div></details>';
+  }
+
   function card(k, v, s) {
     return '<div class="stat"><div class="k">' + esc(k) + '</div><div class="v">' + esc(v) + '</div><div class="s">' + esc(s || "") + '</div></div>';
   }
@@ -457,6 +483,7 @@
     else if (S.page === "profile") job = pageProfile();
     else if (S.page === "extra") job = Promise.resolve(renderExtra());
     else if (S.page === "settings") job = Promise.resolve(pageSettings());
+    else if (S.page === "napcat") job = Promise.resolve(pageNapcat());
     else if (S.page === "labels") job = pageLabels();
     else if (S.page === "memes") job = pageMemes();
     else job = Promise.resolve(renderGroupFields(meta.group));
@@ -544,6 +571,12 @@
       if (nav) { e.preventDefault(); S.page = nav.getAttribute("data-page"); render(); return; }
 
       if (e.target.closest("#pill-napcat") || e.target.closest("#btn-napcat")) { openNapcat(); return; }
+      if (e.target.closest("#btn-reconnect")) {
+        toast("正在重连…");
+        return api("/api/action", { action: "reconnect" }).then(function (r) {
+          return loadGroups().then(refreshTop).then(function () { render(); toast(r.ok ? ("已重连 " + (r.url || "")) : "重连失败", !r.ok); });
+        });
+      }
       if (e.target.closest("#btn-refresh")) { loadGroups().then(refreshTop).then(function () { render(); }); toast("已刷新"); return; }
       if (e.target.closest("#btn-enable")) { if (!S.gid) return toast("先选一个群", true); return doAction({ action: "groupEnable", gid: S.gid }, "本群已启用"); }
       if (e.target.closest("#btn-disable")) { if (!S.gid) return toast("先选一个群", true); return doAction({ action: "groupDisable", gid: S.gid }, "本群已停用"); }

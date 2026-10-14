@@ -58,7 +58,7 @@ export function createMockOneBotServer(opts) {
       const got = url.searchParams.get("access_token") || "";
       ok = !token || got === token;
     } catch (e) { ok = false; }
-    if (!ok) { socket.write("HTTP/1.1 401 Unauthorized" + "\r\n\r\n"); socket.destroy(); return; }
+    if (!ok && o.rejectMode === "handshake") { socket.write("HTTP/1.1 401 Unauthorized" + "\r\n\r\n"); socket.destroy(); return; }
     const key = req.headers["sec-websocket-key"];
     const accept = crypto.createHash("sha1").update(String(key) + GUID).digest("base64");
     socket.write([
@@ -69,6 +69,14 @@ export function createMockOneBotServer(opts) {
       "", ""
     ].join("\r\n"));
     sockets.add(socket);
+    if (!ok) {
+      // 真 NapCat 的做派：握手照做，然后回一个 retcode 1403 再关掉连接。
+      // 客户端能不能识别这个，决定了它到底是"哑巴重连"还是能告诉你"token 验证失败"。
+      try { socket.write(encodeFrame(JSON.stringify({ status: "failed", retcode: 1403, data: null, message: "token验证失败", wording: "token验证失败", echo: null, stream: "normal-action" }), 0x1)); } catch (e) {}
+      // 给客户端留足够时间收完帧再关：真 NapCat 也是"发完 1403 才断"
+      setTimeout(function () { try { socket.end(); } catch (e) {} }, 250);
+      return;
+    }
     let buf = Buffer.alloc(0);
     socket.on("data", function (d) {
       buf = Buffer.concat([buf, d]);

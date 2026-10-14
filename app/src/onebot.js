@@ -97,6 +97,7 @@ export function createOneBot(opts) {
   let selfId = o.selfId ? String(o.selfId) : null;
   let ws = null, stopped = false, retry = 0, timer = null;
   let state = "idle";
+  let lastIncoming = null;      // 服务端最近一次回话（token 验证失败这类会走这里）
 
   function setState(s, extra) {
     state = s;
@@ -122,6 +123,13 @@ export function createOneBot(opts) {
   function handlePayload(payload) {
     const data = typeof payload === "string" ? safeJson(payload) : payload;
     if (!data) return;
+    // 服务端的错误回包（比如 NapCat 的 token 验证失败：retcode 1403）没有 echo，单独记下来
+    if (data.retcode != null && data.retcode !== 0 && data.echo == null) {
+      lastIncoming = { retcode: data.retcode, message: data.message || data.wording || "", at: nowFn() };
+      setState("rejected", { retcode: data.retcode, message: lastIncoming.message });
+      if (o.onRejected) { try { o.onRejected(lastIncoming); } catch (e) {} }
+      return;
+    }
     if (data.echo != null && data.retcode != null) {          // 动作回执
       const p = pendingActions.get(String(data.echo));
       if (p) {
@@ -155,8 +163,18 @@ export function createOneBot(opts) {
     ws = sock;
     sock.onopen = function () { retry = 0; setState("open"); if (o.onOpen) { try { o.onOpen(); } catch (e) {} } };
     sock.onmessage = function (m) { handlePayload(m && m.data !== undefined ? m.data : m); };
-    sock.onclose = function () { if (!stopped) { setState("closed"); scheduleRetry(); } };
-    sock.onerror = function (e) { setState("error", { error: String((e && e.message) || e) }); };
+    sock.onclose = function () {
+    if (stopped) return;
+    // 被服务端拒绝（例如 token 不符）不是普通的断开：保留 rejected，别让重连把它盖成一句"closed"
+    if (state !== "rejected") setState("closed");
+    scheduleRetry();
+  };
+    // 被拒之后紧跟着的异常关闭（undici 会先 onerror 再 onclose）不能把 rejected 盖掉，
+    // 否则用户看到的永远是"断开"，查不出是 token 不对。
+    sock.onerror = function (e) {
+      if (state === "rejected") return;
+      setState("error", { error: String((e && e.message) || e) });
+    };
     return sock;
   }
 
@@ -231,6 +249,8 @@ export function createOneBot(opts) {
     sendGroupRecord: sendGroupRecord, callAction: callAction, callActionAsync: callActionAsync,
     pendingActions: function () { return pendingActions.size; },
     state: function () { return state; }, selfId: function () { return selfId; },
+    url: function () { return o.url; }, tokenSet: function () { return !!o.token; },
+    lastMessage: function () { return lastIncoming; },
     sentIds: sentIds, seenCount: function () { return seen.size; },
     config: cfg
   };

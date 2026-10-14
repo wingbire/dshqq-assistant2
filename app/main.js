@@ -50,11 +50,36 @@ const cli = resolveDshCli();
 const boot = ensureBrainProfile({ cliPath: cli, persona: persona, personaText: (String(getPath(cfg, "persona.globalText") || "").trim() || undefined) });
 log("大脑 profile：" + JSON.stringify({ ok: boot.ok, patch: boot.patch || null, error: boot.error || null }));
 
-const ob = createOneBot({
-  url: rc.onebot.wsUrl, token: rc.onebot.token, reconnectMs: rc.onebot.reconnectMs,
-  onEvent: function (evt) { runtime.onEvent(evt); },
-  onStatus: function (s) { if (s.state !== "reconnecting" || (s.retry || 0) % 5 === 0) log("onebot: " + s.state + (s.error ? " " + s.error : "")); }
-});
+// OneBot 客户端做成可重建的：改完接入设置点「重连」就能立刻生效，不用重启程序
+const link = { ob: null };
+let liveCfg = cfg;                      // 配置端改过的配置（内存里这份才是"当前"）
+function onebotOpts(c) {
+  const r = runtimeConfig(c);
+  return { url: r.onebot.wsUrl, token: r.onebot.token, reconnectMs: r.onebot.reconnectMs };
+}
+function buildOneBot(c) {
+  const o = onebotOpts(c);
+  return createOneBot({
+    url: o.url, token: o.token, reconnectMs: o.reconnectMs,
+    onEvent: function (evt) { runtime.onEvent(evt); },
+    onStatus: function (s) {
+      if (s.state === "rejected") { log("onebot: 被服务端拒绝 —— " + s.message + "（retcode " + s.retcode + "）"); return; }
+      if (s.state !== "reconnecting" || (s.retry || 0) % 5 === 0) log("onebot: " + s.state + (s.error ? " " + s.error : ""));
+    },
+    onRejected: function (info) { log("onebot: 服务端说 " + info.message + "（把 token 抄对，或干脆在 NapCat 里留空）"); }
+  });
+}
+function reconnectOnebot(c) {
+  const next = c || liveCfg;
+  liveCfg = next;
+  const o = onebotOpts(next);
+  try { if (link.ob) link.ob.close(); } catch (e) {}
+  link.ob = buildOneBot(next);
+  link.ob.connect();
+  log("onebot: 重新连接 " + o.url + (o.token ? "（带 token）" : "（无 token）"));
+  return { ok: true, url: o.url, tokenSet: !!o.token, state: link.ob.state() };
+}
+reconnectOnebot(cfg);
 
 // N11 外审通道：独立 qq-audit profile，8 秒超时 → 不确定
 const auditor = createAuditor({
@@ -101,10 +126,10 @@ log("NapCat 配置页：" + rc.napcatWebui + "（配置端右上角有快捷入�
 const runtime = createRuntime({
   config: cfg, runtime: rc, store: store, bot: bot, search: searchSvc, memes: memes, vision: vision, tts: tts,
   imageDir: path.join(BRAIN_TMP_DIR, "images"),
-  sendRecord: function (gid, file) { log("→语音 " + gid + " : " + path.basename(file)); return ob.sendGroupRecord(gid, file); },
-  sendImage: function (gid, file) { log("→图 " + gid + " : " + path.basename(file)); return ob.sendGroupImage(gid, file); },
+  sendRecord: function (gid, file) { log("→语音 " + gid + " : " + path.basename(file)); return link.ob ? link.ob.sendGroupRecord(gid, file) : false; },
+  sendImage: function (gid, file) { log("→图 " + gid + " : " + path.basename(file)); return link.ob ? link.ob.sendGroupImage(gid, file) : false; },
   evtDefaults: { botNames: [persona.botName], nicknames: [persona.botName], interests: persona.interests, dislikes: persona.dislikes },
-  send: function (gid, text) { log("→ " + gid + " : " + text); return ob.sendGroupMsg(gid, text); },
+  send: function (gid, text) { log("→ " + gid + " : " + text); return link.ob ? link.ob.sendGroupMsg(gid, text) : false; },
   askBrain: async function (o) {
     if (!cli) return { ok: false, error: "找不到 DSH 启动器" };
     return runBrain({ cliPath: cli, promptText: o.promptText, timeoutMs: 60000 });
@@ -117,11 +142,23 @@ const runtime = createRuntime({
 let obCache = { at: 0, value: null };
 async function probeOnebot(force) {
   if (!force && obCache.value && Date.now() - obCache.at < 5000) return obCache.value;
-  const v = { state: ob.state(), selfId: ob.selfId(), online: false, good: false, version: null, nickname: null, protocol: null, error: null, at: Date.now() };
-  if (ob.state() === "open") {
-    const st = await ob.callActionAsync("get_status", {}, 4000);
-    const li = await ob.callActionAsync("get_login_info", {}, 4000);
-    const vi = await ob.callActionAsync("get_version_info", {}, 4000);
+  const obc = link.ob;
+  const o2 = onebotOpts(liveCfg);
+  const v = {
+    state: obc ? obc.state() : "idle", selfId: obc ? obc.selfId() : null,
+    url: obc ? obc.url() : null,                             // 运行中的客户端实际在连哪个地址
+    tokenSet: obc ? obc.tokenSet() : false,
+    savedUrl: o2.url, savedTokenSet: !!o2.token,             // 配置里现在存的是哪个
+    online: false, good: false, version: null, nickname: null, protocol: null, error: null, at: Date.now()
+  };
+  if (obc && obc.lastMessage && obc.lastMessage()) {
+    const lm = obc.lastMessage();
+    v.error = lm.message + "（retcode " + lm.retcode + "）";
+  }
+  if (obc && obc.state() === "open") {
+    const st = await obc.callActionAsync("get_status", {}, 4000);
+    const li = await obc.callActionAsync("get_login_info", {}, 4000);
+    const vi = await obc.callActionAsync("get_version_info", {}, 4000);
     v.online = !!(st.ok && st.data && st.data.online);
     v.good = !!(st.data && st.data.good);
     v.error = st.ok ? null : (st.error || "get_status 失败");
@@ -135,8 +172,8 @@ async function probeOnebot(force) {
   return v;
 }
 async function listGroups() {
-  if (ob.state() !== "open") return [];
-  const r = await ob.callActionAsync("get_group_list", {}, 6000);
+  if (!link.ob || link.ob.state() !== "open") return [];
+  const r = await link.ob.callActionAsync("get_group_list", {}, 6000);
   if (!r.ok || !Array.isArray(r.data)) return [];
   return r.data.map(function (g) {
     return { group_id: String(g.group_id), group_name: g.group_name || "", member_count: g.member_count, max_member_count: g.max_member_count };
@@ -145,18 +182,26 @@ async function listGroups() {
 
 // 人设改了要立刻重渲染 profile 里的 personaPrefix（下一轮大脑调用生效），否则改了要等重启
 async function onConfigSaved(next) {
-  if (!cli) return { ok: false, error: "找不到 DSH 启动器，改完要重启程序才生效" };
+  // 接入类改动（WS 地址 / token）不需要重启：直接重建 OneBot 客户端
+  const before = onebotOpts(liveCfg), after = onebotOpts(next);
+  liveCfg = next;
+  let linkNote = null;
+  if (before.url !== after.url || before.token !== after.token) {
+    linkNote = reconnectOnebot(next);
+    log("接入设置变了 → 已自动重连：" + after.url);
+  }
+  if (!cli) return { ok: false, error: "找不到 DSH 启动器，改完要重启程序才生效", reconnect: linkNote };
   const p = personaFromConfig(next);
   const text = String(getPath(next, "persona.globalText") || "").trim();
   const r = ensureBrainProfile({ cliPath: cli, persona: p, personaText: text || undefined });
-  if (!r.ok) return { ok: false, error: r.error || "写 profile 失败" };
-  return { ok: true, source: text ? "手写的全局人设" : "按字段拼装", patch: r.patch, bytes: text ? text.length : undefined };
+  if (!r.ok) return { ok: false, error: r.error || "写 profile 失败", reconnect: linkNote };
+  return { ok: true, source: text ? "手写的全局人设" : "按字段拼装", patch: r.patch, reconnect: linkNote };
 }
 
 // 设置页：git 更新 + 依赖体检（依赖探测里有些要起进程，内部有 20 秒缓存）
 const depsProbe = createDepsProbe({
   dshCli: cli,
-  onebotState: function () { return ob.state(); },
+  onebotState: function () { return link.ob ? link.ob.state() : "idle"; },
   hasApiKey: function () { return !!pickApiKey(); },
   requireFn: _require,
   qqPaths: cfg && cfg.runtime && cfg.runtime.qqPaths ? cfg.runtime.qqPaths : undefined
@@ -181,7 +226,8 @@ async function doDepFix(id) {
 const webui = createWebUi({
   config: cfg, table: table, store: store, memes: memes, runtime: runtime, labels: runtime.labels,
   configFile: CONFIG_FILE, probeOnebot: probeOnebot, listGroups: listGroups, onConfigSaved: onConfigSaved,
-  checkUpdate: doCheckUpdate, applyUpdate: doApplyUpdate, depsProbe: async function () { return depsProbe.probe(); }, depFix: doDepFix
+  checkUpdate: doCheckUpdate, applyUpdate: doApplyUpdate, depsProbe: async function () { return depsProbe.probe(); }, depFix: doDepFix,
+  reconnect: function () { return reconnectOnebot(liveCfg); }
 });
 
 if (selftest) {
@@ -194,7 +240,7 @@ if (selftest) {
     log("配置端：已停用");
   }
   const st = runtime.status();
-  log("自检通过：" + JSON.stringify({ mode: st.mode, onebotState: ob.state(), config: redactConfig(cfg, table).runtime || null }));
+  log("自检通过：" + JSON.stringify({ mode: st.mode, onebotState: link.ob ? link.ob.state() : "idle", config: redactConfig(cfg, table).runtime || null }));
   const ls = runtime.labelStatus();
   log("学习：待标注 " + (ls ? ls.pending : 0) + " 条 / 已标注 " + (ls ? ls.labeled : 0) + " 条（满 " + (ls ? ls.minSamples : 30) + " 条自动回流标定）");
   log("配置片断：" + JSON.stringify({ persona: redactConfig(cfg, table).persona, napcat: redactConfig(cfg, table).napcat }));
@@ -206,7 +252,6 @@ if (rc.webuiEnabled) {
     .catch(function (e) { log("配置端启动失败：" + e.message); });
 }
 
-ob.connect();
 const timer = setInterval(function () { runtime.tick().catch(function (e) { log("tick 失败：" + e.message); }); }, tickMs);
 if (timer.unref) timer.unref();
 setInterval(function () {
@@ -218,7 +263,7 @@ process.on("SIGINT", function () {
   log("收到 SIGINT，收尾中…");
   runtime.budget.save(path.join(DATA_ROOT, "data", "budget.json"));
   store.saveBandit({ state: bot.bandit.state(), at: new Date().toISOString() });
-  ob.close();
+  if (link.ob) link.ob.close();
   clearInterval(timer);
   setTimeout(function () { process.exit(0); }, 200);
 });
