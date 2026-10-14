@@ -127,6 +127,8 @@ export function createWebUi(deps) {
   const depsProbeFn = d.depsProbe || null;        // async () => { items: [...] }
   const depFixFn = d.depFix || null;              // async (id) => { ok, open?, output? }
   const reconnectFn = d.reconnect || null;        // async () => { ok, url, state } —— 接入设置改完不用重启
+  const pluginsProbeFn = d.plugins || null;       // async () => { items: [...] } —— 社区插件兼容
+  const pluginInstallFn = d.installPlugin || null;
   const probeOnebot = d.probeOnebot || null;      // async (force) => { state, selfId, online, version, nickname }
   const listGroups = d.listGroups || null;        // async () => [{ group_id, group_name, member_count }]
   const startedAt = Date.now();
@@ -245,6 +247,17 @@ export function createWebUi(deps) {
       if (req.method === "POST") return sendJson(res, 200, applyUpdateFn ? await applyUpdateFn() : { ok: false, error: "没有接更新服务" });
       return sendJson(res, 405, { ok: false, error: "不支持的方法" });
     }
+    if (p === "/api/plugins" && req.method === "GET") {
+      return sendJson(res, 200, pluginsProbeFn ? await pluginsProbeFn() : { ok: false, items: [] });
+    }
+    if (p === "/api/plugins/install" && req.method === "POST") {
+      const body = await readBody(req);
+      let b = null;
+      try { b = JSON.parse(body); } catch (e) { return sendJson(res, 400, { ok: false, error: "JSON 解析失败" }); }
+      if (!b || !b.id) return sendJson(res, 400, { ok: false, error: "缺少 id" });
+      return sendJson(res, 200, pluginInstallFn ? await pluginInstallFn(String(b.id)) : { ok: false, error: "没有接插件安装服务" });
+    }
+
     if (p === "/api/deps" && req.method === "GET") {
       return sendJson(res, 200, depsProbeFn ? await depsProbeFn() : { ok: false, items: [] });
     }

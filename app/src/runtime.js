@@ -6,6 +6,10 @@ import { createDefaultCommands } from "./commands.js";
 import { createMemeLibrary, shouldAttachMeme } from "./meme.js";
 import { resolveLocalImage, downloadImage, injectVision } from "./vision.js";
 import { parseVoiceTag } from "./tts.js";
+import { parseIllustration, illustrationFor, parseChart } from "./dshprofile.js";
+import { WORKSPACE_ROOT } from "./paths.js";
+import fs from "node:fs";
+import path from "node:path";
 import { localReply } from "./localreply.js";
 import { depthPolicy, buildTaskText } from "./brain.js";
 import { parseMeme } from "./audit.js";
@@ -72,7 +76,7 @@ export function createRuntime(deps) {
     });
   }
 
-  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0, memesSent: 0, memesMissed: 0, memesSuppressed: 0, proactiveTried: 0, proactiveSpoken: 0, proactiveBlocked: 0, visionCalls: 0, visionOk: 0, visionFail: 0, voiceSent: 0, voiceFailed: 0 };
+  const stats = { events: 0, ignored: 0, observed: 0, replies: 0, segments: 0, brainCalls: 0, tokens: 0, searchTokens: 0, searches: 0, searchCacheHits: 0, stopped: 0, adminCmds: 0, feedbackResolved: 0, refits: 0, labelCandidates: 0, memesSent: 0, memesMissed: 0, memesSuppressed: 0, proactiveTried: 0, proactiveSpoken: 0, proactiveBlocked: 0, visionCalls: 0, visionOk: 0, visionFail: 0, voiceSent: 0, voiceFailed: 0, illustrationsSent: 0, illustrationsFailed: 0, chartsSent: 0, chartsFailed: 0 };
   let busy = false;
 
   function observe(rec) {
@@ -457,7 +461,9 @@ export function createRuntime(deps) {
     }
 
     const voiced = parseVoiceTag(text || "");        // N18：先摘 [语音: 文本]
-    const parsed = parseMeme(voiced.text);
+    const drawn = parseIllustration(voiced.text);    // 再摘 [立绘] / [立绘: 幼年]
+    const chart = parseChart(drawn.text);            // 再摘 [图表: 路径]（archify 画的图）
+    const parsed = parseMeme(chart.text);
     const segments = splitReply(parsed.text, dec.maxChars || 60, { maxSegments: rc.maxSegments });
     const sent = [];
     for (let i = 0; i < segments.length; i++) {
@@ -472,6 +478,48 @@ export function createRuntime(deps) {
     if (voiced.voice) {
       const v = await speak(evt.gid, voiced.voice);
       voiceInfo = v.ok ? { chars: v.chars, bytes: v.bytes } : { error: v.error };
+    }
+    // 立绘：[立绘] 发当前形态的图，[立绘: 幼年] 临时换形态
+    let artInfo = null;
+    if (drawn.wanted) {
+      const pick = illustrationFor(drawn.stage,
+        rc && rc.illustrations ? rc.illustrations.young : null,
+        rc && rc.illustrations ? rc.illustrations.adult : null);
+      const abs = path.isAbsolute(pick.rel) ? pick.rel : path.resolve(WORKSPACE_ROOT, pick.rel);
+      if (fs.existsSync(abs)) {
+        if (sendImage) sendImage(evt.gid, abs);
+        stats.illustrationsSent += 1;
+        artInfo = { stage: pick.stage, file: path.basename(abs) };
+      } else {
+        stats.illustrationsFailed += 1;
+        artInfo = { error: "找不到立绘：" + pick.rel };
+      }
+    }
+    // 图表：archify 画完把 PNG 路径写在 [图表: …] 里，程序发出去；按配置发完就删（群聊里不留图）
+    let chartInfo = null;
+    if (chart.wanted && (!rc.plugins || rc.plugins.archify !== false)) {
+      const abs = path.isAbsolute(chart.file) ? chart.file : path.resolve(WORKSPACE_ROOT, chart.file);
+      if (fs.existsSync(abs)) {
+        if (sendImage) sendImage(evt.gid, abs);
+        stats.chartsSent += 1;
+        const keep = rc.plugins && rc.plugins.archifyCleanup === false;
+        let removed = false;
+        if (!keep) {
+          try {
+            // 连同它所在的 .archify/<...>/ 目录一起删掉：先删文件，目录空了就删目录
+            const dir = path.dirname(abs);
+            fs.unlinkSync(abs);
+            removed = true;
+            if (path.basename(path.dirname(dir)).toLowerCase() === ".archify") {
+              try { fs.rmSync(dir, { recursive: true, force: true }); } catch (e2) { /* 目录里还有别的就留着 */ }
+            }
+          } catch (e) { removed = false; }
+        }
+        chartInfo = { file: path.basename(abs), removed: removed, kept: keep };
+      } else {
+        stats.chartsFailed += 1;
+        chartInfo = { error: "图表文件不存在：" + chart.file };
+      }
     }
     const memeInfo = await attachMeme(evt.gid, parsed.mood, dec.tier);
     stats.replies += 1;
@@ -498,9 +546,9 @@ export function createRuntime(deps) {
     observe({
       kind: "sent", gid: batch.gid, uid: batch.uid, speaker: evt.speaker, tier: dec.tier,
       mergedCount: batch.count, mood: parsed.mood || null, memePending: parsed.mood || null,
-      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo, meme: memeInfo, voice: voiceInfo, vision: visionTexts.length ? visionTexts : null
+      segments: sent, usage: usage, cacheHitRate: r0(usage), search: searchInfo, meme: memeInfo, voice: voiceInfo, art: artInfo, chart: chartInfo, vision: visionTexts.length ? visionTexts : null
     });
-    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo, meme: memeInfo, voice: voiceInfo, vision: visionTexts.length ? visionTexts : null };
+    return { gid: batch.gid, action: "sent", tier: dec.tier, merged: batch.count, segments: sent, usage: usage, mood: parsed.mood || null, search: searchInfo, meme: memeInfo, voice: voiceInfo, art: artInfo, vision: visionTexts.length ? visionTexts : null };
   }
 
   function r0(usage) {

@@ -18,3 +18,8 @@ desktop.ini
 .DS_Store
 # === 分发版：产物目录不进库，只留打包脚本与 zip ===
 dist/DSHQQ-Assistant-*/
+# === 社区插件一键安装产生的内容：不进版本库，点配置端的按钮即可重建 ===
+vendor/
+app/dsh-home/skills/
+app/dsh-home/profiles/*/node_modules/
+app/dsh-home/profiles/*/pnpm-lock.yaml

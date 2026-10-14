@@ -1399,7 +1399,7 @@ t("webui: 配置端 API 读写、遮蔽 secret、挡目录穿越", async functio
     eq(info.port > 0 && info.port !== DEFAULT_PORT, true, "端口 0 应挑一个临时端口");
     const j1 = await (await fetch(info.url + "/api/config")).json();
     eq(j1.ok, true);
-    eq(j1.table.分组.length, 5);
+    eq(j1.table.分组.length, 6, "人设/判定/主动与节流/运行时/接入/额外功能");
     eq(j1.values.napcat.token, "<已配置>", "secret 不能明文回前端");
     ok(JSON.stringify(j1.values).indexOf("SECRET-TOKEN") < 0);
     eq(j1.runtime.webuiPort, 8799);
@@ -1973,6 +1973,46 @@ t("webui: 重连动作能通（改完接入设置不用重启）", async functio
     eq(r2.status, 500, "没接重连服务时要明确报错");
     await ui2.close();
   } finally { await ui.close(); }
+});
+
+t("plugins: 社区插件开关会同步改写全局人设", function () {
+  const on = personaFromConfig({ persona: { memeFreq: "中", botName: "小肥鱼" }, runtime: {}, plugins: { meme: true, archify: true, voice: false, vision: false } });
+  const t1 = buildPersonaText(on);
+  ok(t1.indexOf("【表情包】") >= 0, "开着 dsh-meme 就该写配图规则");
+  ok(t1.indexOf("【画图】") >= 0, "开着 archify 就该写画图规则");
+  ok(t1.indexOf("[图表:") >= 0, "要告诉它图表标记怎么写");
+
+  const off = personaFromConfig({ persona: { memeFreq: "中", botName: "小肥鱼" }, runtime: {}, plugins: { meme: false, archify: false, voice: false, vision: false } });
+  eq(off.memeEnabled, false, "插件关了，memeFreq 是「中」也不算开");
+  const t2 = buildPersonaText(off);
+  eq(t2.indexOf("【表情包】"), -1, "关掉 dsh-meme 后人设不该再提配图");
+  eq(t2.indexOf("【画图】"), -1, "关掉 archify 后人设不该再提画图");
+});
+
+t("channel: 大脑走 OFM 时三档 overlay 去掉 reasoningEffort，二判走 patch 带模型", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "ofm-" + Date.now());
+  const dshHome = path.join(dir, "dsh-home");
+  fs.mkdirSync(path.join(dshHome, "profiles", "qq-brain"), { recursive: true });
+  fs.writeFileSync(path.join(dshHome, "profiles", "qq-brain", "package.json"), "{}");
+  const launch = { exe: "x", cliJs: "y" };
+
+  const r = ensureBrainProfile({ dshHome: dshHome, profile: "qq-brain", overrideLaunch: launch, persona: { botName: "小肥鱼" }, model: { provider: "our-free-model", model: "ling-3.1-flash-free" } });
+  eq(r.ok, true);
+  const tierLow = JSON.parse(fs.readFileSync(r.tiers.low, "utf8"));
+  eq(tierLow[0].config.provider, "our-free-model");
+  eq(tierLow[0].config.model, "ling-3.1-flash-free");
+  eq("reasoningEffort" in tierLow[0].config, false, "免费池模型不认 effort，必须不带");
+  const patch = JSON.parse(fs.readFileSync(r.patch, "utf8"));
+  eq(patch.length, 2, "persona + model 两条");
+  eq(patch[0].id, "system-prompt");
+  eq(patch[1].id, "agent-default-model");
+  eq(patch[1].config.provider, "our-free-model");
+
+  const r2 = ensureBrainProfile({ dshHome: dshHome, profile: "qq-brain", overrideLaunch: launch, persona: { botName: "小肥鱼" } });
+  const tier2 = JSON.parse(fs.readFileSync(r2.tiers.low, "utf8"));
+  eq(tier2[0].config.provider, "deepseek-official", "不选 OFM 就回官方默认");
+  eq(tier2[0].config.reasoningEffort, "off", "官方模型该带 effort 还是要带");
+  eq(JSON.parse(fs.readFileSync(r2.patch, "utf8")).length, 1, "不选 OFM 时 patch 只有 persona 一条");
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===

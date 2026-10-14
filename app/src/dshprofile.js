@@ -22,23 +22,24 @@ export function tierOverlayPath(dshHome, profileId, tier) {
 // 前缀缓存可以跨档共享（这是把「三个 profile」换成「一个 profile + 三个补丁」的原因）。
 export function renderTierOverlay(tier, base) {
   const effort = TIER_EFFORT[tier] || "low";
-  const entry = {
-    id: "agent-default-model",
-    config: Object.assign({ provider: "deepseek-official", model: "deepseek-flash", reasoningEffort: effort }, base || {})
-  };
+  const cfg = Object.assign({ provider: "deepseek-official", model: "deepseek-flash", reasoningEffort: effort }, base || {});
+  // 走社区插件（Our Free Model）时不能带 reasoningEffort：免费池里的模型大多不认这个字段，
+  // 会直接报 'does not support reasoning effort "off"'。传 null 就等于不带。
+  if (cfg.reasoningEffort == null) delete cfg.reasoningEffort;
+  const entry = { id: "agent-default-model", config: cfg };
   return JSON.stringify([entry], null, 2) + String.fromCharCode(10);
 }
 
-export function writeTierOverlay(dshHome, profileId, tier) {
+export function writeTierOverlay(dshHome, profileId, tier, base) {
   const dir = ensureDir(profileDir(dshHome, profileId));
   const file = path.join(dir, "tier-" + tier + ".patch.yml");
-  fs.writeFileSync(file, renderTierOverlay(tier), "utf8");
+  fs.writeFileSync(file, renderTierOverlay(tier, base), "utf8");
   return file;
 }
 
-export function writeAllTierOverlays(dshHome, profileId) {
+export function writeAllTierOverlays(dshHome, profileId, base) {
   const out = {};
-  for (const t of TIER_ORDER) out[t] = writeTierOverlay(dshHome, profileId, t);
+  for (const t of TIER_ORDER) out[t] = writeTierOverlay(dshHome, profileId, t, base);
   return out;
 }
 
@@ -50,6 +51,8 @@ export const PERSONA_FIELDS = [
 // N3 决策：先默认。史料里的「蓝色大肥鱼」全文可用 prompts/ 覆盖回来。
 export const DEFAULT_PERSONA = {
   memeEnabled: true, voiceEnabled: false, visionEnabled: false, voiceMaxChars: 60,
+  ageStage: "成年",
+  illustrationYoung: "角色形象图/幼年.jpg", illustrationAdult: "角色形象图/成年.jpg",
   botName: "小肥鱼",
   age: "二十来岁",
   traits: ["嘴贫但有分寸", "对熟的人话多", "被问到就认真"],
@@ -68,6 +71,28 @@ export const OVERFLOW_TEXT = {
 };
 export const MEME_FREQ_TEXT = { "关": "不配图", "少": "只在情绪明确时配一张，正式解释不配图", "中": "情绪到位就配一张，一条最多 1 张" };
 
+// 从大脑输出里摘出图表标记：[图表: <png 绝对路径>]（archify 画完后由程序发出去）
+export function parseChart(text) {
+  const s = String(text == null ? "" : text);
+  const m = s.match(/\[图表\s*[:：]\s*([^\]]+)\]/);
+  if (!m) return { text: s, wanted: false, file: null };
+  return { text: (s.slice(0, m.index) + s.slice(m.index + m[0].length)).replace(/\s+$/, ""), wanted: true, file: m[1].trim() };
+}
+
+// 按形态挑立绘文件（相对工作区）
+export function illustrationFor(stage, young, adult) {
+  const st = stage === "幼年" ? "幼年" : "成年";
+  return { stage: st, rel: st === "幼年" ? (young || DEFAULT_PERSONA.illustrationYoung) : (adult || DEFAULT_PERSONA.illustrationAdult) };
+}
+
+// 从大脑输出里摘出立绘标记：[立绘] 用当前形态，[立绘: 幼年] 临时指定
+export function parseIllustration(text) {
+  const s = String(text == null ? "" : text);
+  const m = s.match(/\[立绘(?:\s*[:：]\s*(幼年|成年))?\]/);
+  if (!m) return { text: s, wanted: false, stage: null };
+  return { text: (s.slice(0, m.index) + s.slice(m.index + m[0].length)).replace(/\s+$/, ""), wanted: true, stage: m[1] || null };
+}
+
 export function personaFromConfig(cfg) {
   const c = cfg || {};
   const p = c.persona || {};
@@ -84,7 +109,11 @@ export function personaFromConfig(cfg) {
     overflow: OVERFLOW_TEXT[p.overflow] || DEFAULT_PERSONA.overflow,
     memeRate: MEME_FREQ_TEXT[p.memeFreq] || DEFAULT_PERSONA.memeRate,
     // 能力开关：关掉的额外功能不写进人设，模型就不会去用它
-    memeEnabled: p.memeFreq !== "关",
+    archifyEnabled: (c.plugins ? c.plugins.archify !== false : true),
+    ageStage: (p.ageStage === "幼年" ? "幼年" : "成年"),
+    illustrationYoung: p.illustrationYoung || DEFAULT_PERSONA.illustrationYoung,
+    illustrationAdult: p.illustrationAdult || DEFAULT_PERSONA.illustrationAdult,
+    memeEnabled: (c.plugins ? c.plugins.meme !== false : true) && p.memeFreq !== "关",
     voiceEnabled: voiceOn,
     voiceMaxChars: (rt.voice && rt.voice.maxChars) || 60,
     visionEnabled: visionOn
@@ -111,6 +140,17 @@ export function buildPersonaText(persona, cfg) {
   L.push("- 不说「有什么可以帮您」这类机器话；不每次都用问句收尾。");
   L.push("- 超字数时：" + p.overflow);
   L.push("");
+  // 形象：默认全局人设里就写死她的长相，并说清 [立绘] 怎么用；形态由「当前形态」决定
+  const artStage = p.ageStage === "幼年" ? "幼年" : "成年";
+  L.push("【形象】");
+  L.push("- 你的外形是一位「鲸鱼娘」：一头深蓝渐变到浅蓝的长发，发梢近乎透明；一双天蓝色的圆眼睛；额前是白色荷叶边的女仆头饰，右侧别着一枚浅蓝蝴蝶结；头两侧是一对鲸鱼鳍形状的耳朵；身后拖着一条鲸鱼尾巴。");
+  L.push("- 穿深蓝配白边的女仆连衣裙，白围裙正中绣着一只小鲸鱼，脚上是深蓝色玛丽珍鞋。");
+  L.push(artStage === "幼年"
+    ? "- 当前形态：**幼年**。个子小小的，脸圆圆的，笑起来会露牙齿，动作活泼，总爱抬手打招呼。"
+    : "- 当前形态：**成年**。身量修长，神情大方，长裙及地，会拎起裙摆行个礼。");
+  L.push("- 有人问「你长什么样」「发张立绘」「有照片吗」，或聊天里想露个脸，就在正文末尾写标记：[立绘]。系统会把当前形态的立绘发出去，一条消息最多一次。");
+  L.push("");
+
   // 额外功能按开关写进人设：关掉的不要出现在人设里，模型也就不会去用
   if (p.memeEnabled !== false) {
     L.push("【表情包】");
@@ -120,6 +160,12 @@ export function buildPersonaText(persona, cfg) {
   if (p.voiceEnabled) {
     L.push("【语音】");
     L.push("- 想用语音说话时，在正文末尾写标记：[语音: 要念的内容]。不超过 " + (p.voiceMaxChars || 60) + " 个字，正式解释别用语音。");
+    L.push("");
+  }
+  if (p.archifyEnabled) {
+    L.push("【画图】");
+    L.push("- 有人要「画个流程图/架构图/时序图」，或一段话用图讲更清楚时，用 architect 技能（archify）：把结构写成 JSON 再渲染成 PNG。");
+    L.push("- 画完在正文末尾写标记：[图表: PNG 的绝对路径]。系统会把图发进群。一条消息最多一张。");
     L.push("");
   }
   if (p.visionEnabled) {
@@ -142,7 +188,7 @@ export function buildPersonaText(persona, cfg) {
 }
 
 // 生成 profile 的 patch 层（顶层必须是 loader patch 数组，DSH 只认这个形状）。
-export function renderProfilePatch(personaText, extraConfig) {
+export function renderProfilePatch(personaText, extraConfig, model) {
   const entry = {
     id: "system-prompt",
     config: Object.assign({
@@ -152,17 +198,23 @@ export function renderProfilePatch(personaText, extraConfig) {
       includeRuntimeContext: false
     }, extraConfig || {})
   };
-  return JSON.stringify([entry], null, 2) + String.fromCharCode(10);
+  const arr = [entry];
+  if (model && model.provider && model.model) {
+    const mc = { provider: model.provider, model: model.model };
+    if (model.reasoningEffort) mc.reasoningEffort = model.reasoningEffort;
+    arr.push({ id: "agent-default-model", config: mc });
+  }
+  return JSON.stringify(arr, null, 2) + String.fromCharCode(10);
 }
 
 export function profileDir(dshHome, profileId) {
   return path.join(dshHome || DSH_HOME, "profiles", profileId || PROFILE_ID);
 }
 
-export function writeProfilePatch(dshHome, profileId, personaText, extraConfig) {
+export function writeProfilePatch(dshHome, profileId, personaText, extraConfig, model) {
   const dir = ensureDir(profileDir(dshHome, profileId));
   const file = path.join(dir, "cordis.patch.yml");
-  fs.writeFileSync(file, renderProfilePatch(personaText, extraConfig), "utf8");
+  fs.writeFileSync(file, renderProfilePatch(personaText, extraConfig, model), "utf8");
   return file;
 }
 

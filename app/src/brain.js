@@ -260,7 +260,10 @@ export function ensureBrainProfile(opts) {
   const r = ensureProfile({ dshHome: dshHome, profileId: profileId, launch: launch, timeoutMs: o.timeoutMs });
   if (!r.ok) return r;
   const personaText = o.personaText != null ? String(o.personaText) : buildPersonaText(o.persona);
-  const file = writeProfilePatch(dshHome, profileId, personaText);
-  const tiers = writeAllTierOverlays(dshHome, profileId);
+  // 模型通道：不传就维持官方默认；传了（社区插件 Our Free Model）就连 patch 带三档一起改
+  const model = o.model || null;
+  const tierBase = model ? { provider: model.provider, model: model.model, reasoningEffort: null } : undefined;
+  const file = writeProfilePatch(dshHome, profileId, personaText, null, model);
+  const tiers = writeAllTierOverlays(dshHome, profileId, tierBase);
   return { ok: true, created: r.created, dir: r.dir, patch: file, tiers: tiers };
 }

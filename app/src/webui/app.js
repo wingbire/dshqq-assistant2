@@ -53,6 +53,30 @@
       persona: "设为「关」后人设里不再提配图，模型也就不会发 [表情: …]" }
   ];
 
+  /* 【社区插件兼容】四张卡 */
+  var PLUGIN_CARDS = [
+    { id: "ourFreeModel", role: "二判通道",
+      desc: "免费模型池。二判（外审）是独立通道，走它不占你付费额度。",
+      installNote: "装进 app/dsh-home/profiles/qq-audit 并挂进 bundles",
+      keys: ["plugins.ourFreeModel", "plugins.ourFreeModelId"] },
+    { id: "ourFreeModel", role: "大脑通道",
+      desc: "回复本体也走免费模型池。注意：免费池模型大多不认三档 effort，开了之后三档 overlay 会自动去掉 reasoningEffort。",
+      installNote: "同一个插件，装在 app/dsh-home/profiles/qq-audit 即可复用",
+      keys: ["plugins.ourFreeModelBrain", "plugins.ourFreeModelBrainId"] },
+    { id: "freeSearch", role: "搜索通道",
+      desc: "24 个搜索引擎 + 智能路由与故障回退。开着就用它的引擎，关掉用本程序内置的直搜（Bing/DDG）。",
+      installNote: "装进 app/vendor，程序直接 import 它的引擎函数",
+      keys: ["plugins.freeSearch", "plugins.freeSearchEngine"] },
+    { id: "archify", role: "图表绘制",
+      desc: "把结构/流程画成图（SVG→PNG）。大脑画好之后由程序把成品发进群。",
+      installNote: "装完把 skills/archify 放进 app/dsh-home/skills",
+      keys: ["plugins.archify", "plugins.archifyCleanup"] },
+    { id: "meme", role: "表情包图库",
+      desc: "本地表情包图库（按情绪标签 + 关键词检索）。",
+      installNote: "在 DSH 桌面端装 dsh-meme，或自己攒一套图后用 meme.packDir 指过去",
+      keys: ["plugins.meme", "meme.packDir", "persona.memeFreq"] }
+  ];
+
   function $(sel) { return document.querySelector(sel); }
   function esc(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, function (c) {
@@ -372,21 +396,53 @@
 
   /* 额外功能页 */
   function renderExtra() {
-    var head = '<div class="card"><div class="body"><div class="hint" style="margin:0">' +
+    var intro = '<div class="card"><div class="body"><div class="hint" style="margin:0">' +
       '这里的开关不只控制程序行为，<b>还会重新生成人设</b>：关掉的功能不会出现在人设里，模型就不会去用它；打开才写进去。保存后下一轮大脑调用生效。</div></div></div>';
-    return head + EXTRA_GROUPS.map(function (g) {
+
+    var builtin = EXTRA_GROUPS.map(function (g) {
       var masterVal = getPath(S.values, g.master);
       var on = g.masterOff ? String(masterVal) !== g.masterOff : masterVal === true;
-      var rows = g.keys.map(function (k) {
-        var f = fieldByKey(k);
-        return f ? fieldRow(f) : "";
-      }).join("");
+      var rows = g.keys.map(function (k) { var f = fieldByKey(k); return f ? fieldRow(f) : ""; }).join("");
       return '<details class="card" open><summary>' + g.icon + ' ' + esc(g.name) +
         '<span class="pill ' + (on ? "ok" : "warn") + '" style="margin-left:auto;font-weight:400">' + (on ? "已开启" : "已关闭") + '</span></summary>' +
         '<div class="body"><div class="hint" style="margin:-2px 0 4px">' + esc(g.desc) + '</div>' +
         '<div class="hint" style="margin:0 0 8px;color:var(--accent-deep)">人设影响：' + esc(g.persona) + '</div>' +
         rows + '</div></details>';
     }).join("");
+
+    return api("/api/plugins").then(function (d) {
+      S.plugins = d;
+      var byId = {};
+      (d.items || []).forEach(function (x) { byId[x.id] = x; });
+      var seen = {};
+      var community = PLUGIN_CARDS.map(function (c) {
+        var it = byId[c.id] || { id: c.id, name: c.id, ready: false, installed: false, detail: "没有探测结果" };
+        // 同一个插件被两张卡复用（二判 / 大脑）时，名字后面标一下是哪一路
+        var title = seen[c.id] ? (it.name + "（" + esc(c.role) + "）") : it.name;
+        seen[c.id] = true;
+        var pill = it.ready ? '<span class="pill ok">已就绪</span>'
+          : (it.installed ? '<span class="pill warn">装了没生效</span>' : '<span class="pill bad">未安装</span>');
+        var rows = c.keys.map(function (k) { var f = fieldByKey(k); return f ? fieldRow(f) : ""; }).join("");
+        var meta = '<div class="hint" style="margin:-2px 0 6px">' +
+          (it.version ? ('版本 ' + esc(it.version) + '　') : "") +
+          (it.count ? (esc(it.count) + ' 张图　') : "") +
+          (it.engine ? ('引擎 ' + esc(it.engine) + '　') : "") +
+          (it.model ? ('模型 ' + esc(it.model) + '　') : "") +
+          esc(it.detail || "") + '</div>';
+        var btn = it.ready ? "" : '<div class="ctl-row" style="margin-top:8px"><button class="btn-sm good" data-pluginfix="' + esc(c.id) + '">一键安装</button>' +
+          '<span class="hint" style="margin:0">' + esc(c.installNote || "") + '</span></div>';
+        return '<details class="card" open><summary>' + title +
+          '<span class="pill" style="margin-left:auto;font-weight:400">' + esc(c.role) + '</span>' + pill + '</summary>' +
+          '<div class="body"><div class="hint" style="margin:-2px 0 6px">' + esc(c.desc) + '</div>' + meta + rows + btn + '</div></details>';
+      }).join("");
+
+      var logBox = S.pluginLog ? '<pre class="pre">' + esc(S.pluginLog) + '</pre>' : "";
+      return intro +
+        '<div class="sec-title">内置额外功能</div>' + builtin +
+        '<div class="sec-title">社区插件兼容</div>' +
+        '<div class="card"><div class="body"><div class="hint" style="margin:0">下面是社区做的 DSH 插件。本程序<b>不打包</b>它们（体积、许可证，而且本该由 DSH 那边管），只做兼容与接线：没装的点「一键安装」，装好就能用；没装或关掉就退回内置实现。<b>任何开关改动保存后都会重新生成全局人设</b>——关掉的能力不会写进人设，模型也就不会去用。</div>' + logBox + '</div></div>' +
+        community;
+    });
   }
 
   /* 设置页：git 更新 + 依赖体检 */
@@ -608,6 +664,19 @@
         S.deps = null; S.depLog = null; toast("正在检测…");
         return api("/api/deps").then(function (r) { S.deps = r; render(); toast("检测完成"); });
       }
+      var pf = e.target.closest("[data-pluginfix]");
+      if (pf) {
+        var pid = pf.getAttribute("data-pluginfix");
+        if (!window.confirm("要现在安装这个社区插件吗？\n\n会联网跑 npm install，可能要一两分钟。")) return;
+        toast("正在安装 " + pid + "…");
+        return api("/api/plugins/install", { id: pid }).then(function (r) {
+          S.pluginLog = (r.output || "") + (r.error ? ("\n" + r.error) : "");
+          S.plugins = null;
+          toast(r.ok ? "安装完成" : ("安装失败：" + (r.error || "")), !r.ok);
+          render();
+        });
+      }
+
       var df = e.target.closest("[data-depfix]");
       if (df) {
         var did = df.getAttribute("data-depfix");

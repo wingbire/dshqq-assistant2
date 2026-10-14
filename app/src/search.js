@@ -1,14 +1,25 @@
 import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
-import { pathToFileURL } from "node:url";
-import { DSH_HOME } from "./paths.js";
+import { pathToFileURL, fileURLToPath } from "node:url";
+import { DSH_HOME, WORKSPACE_ROOT } from "./paths.js";
 
 // N12 决策：搜索做成 B / C 两条可切换的路——
 //   B = 独立一次搜索调用（可以是 DSH 大脑那一路），拿回摘要再作为消息体注入
 //   C = 本机 dsh-free-search 插件直接搜，本地抽成 ≤500 字摘要（不额外花模型 token）
 // 二者都带「群 + 关键词」5 分钟缓存（技术架构文档 §7.5 建议）。
 export const SEARCH_DEFAULTS = { mode: "c", maxResults: 3, maxChars: 500, ttlMs: 300000 };
+
+// 配置端能选的引擎名 → dsh-free-search 里的函数名。没列到的都退回 searchBing。
+export const FREE_SEARCH_ENGINE_FN = {
+  bing: "searchBing", ddg: "searchDdgHtml", searxng: "searchSearxng", baidu: "searchBaidu",
+  kimi: "searchKimi", exa: "searchExa", tavily: "searchTavily", anysearch: "searchAnysearch",
+  jina: "searchJina", github: "searchGithub"
+};
+
+// 社区插件兼容：装了 dsh-free-search 就用它的引擎，没装就退回内置直搜。
+// 它装在 <工作区>/vendor（见 plugins.js 的一键安装）。
+export const VENDOR_FREE_SEARCH = "vendor/node_modules/dsh-free-search/lib/index.js";
 
 // B 通道走自己的 profile，人设就是「搜索摘要员」，与群小助手人设分开
 export const SEARCH_PROFILE_ID = "qq-search";
@@ -57,6 +68,12 @@ export function resolveFreeSearchModule(env) {
   const cands = [];
   if (e.DSHQQ_FREE_SEARCH) cands.push(e.DSHQQ_FREE_SEARCH);
   cands.push(path.join(process.cwd(), "node_modules", "dsh-free-search", "lib", "index.js"));
+  // 本程序自己的一键安装位置（app/vendor），优先于本机 DSH profile
+  cands.push(path.join(WORKSPACE_ROOT, VENDOR_FREE_SEARCH));
+  try {
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    cands.push(path.join(here, "..", "..", VENDOR_FREE_SEARCH));
+  } catch (err) {}
   const home = e.DSHQQ_DSH_HOME || DSH_HOME;
   const profilesDir = path.join(home, "..", "..", "..", "..", "..", ".dsh", "profiles");
   const roots = [profilesDir, path.join(os.homedir(), ".dsh", "profiles")];
@@ -151,14 +168,17 @@ export function createSearch(opts) {
   async function viaC(keywords) {
     const q = (keywords || []).join(" ").trim();
     if (!q) return { ok: false, error: "没有关键词" };
-    if (pluginUsable !== false) {
+    if (o.freeSearchEnabled !== false && pluginUsable !== false) {
       const mod = o.freeSearch !== undefined ? o.freeSearch : await loadFreeSearch(o.freeSearchFile);
-      if (mod && typeof mod.searchBing === "function") {
+      const engineId = String(o.freeSearchEngine || "bing").toLowerCase();
+      const fn = mod ? mod[FREE_SEARCH_ENGINE_FN[engineId] || "searchBing"] : null;
+      if (typeof fn === "function") {
         try {
-          const items = normalizeResults(await mod.searchBing(q, maxResults, {}), maxResults);
-          if (items.length) return { ok: true, items: items, usage: null, engine: "dsh-free-search" };
-        } catch (e) { pluginUsable = false; }
-      } else { pluginUsable = false; }
+          const engineOpts = engineId === "bing" ? { bingMarket: "zh-CN", lang: "zh" } : { lang: "zh" };
+          const items = normalizeResults(await fn(q, maxResults, engineOpts), maxResults);
+          if (items.length) return { ok: true, items: items, usage: null, engine: "dsh-free-search/" + engineId };
+        } catch (e) { /* 这个引擎不行，往下退到内置直搜；不永久禁用插件 */ }
+      } else if (!mod) { pluginUsable = false; }
     }
     const h = await (o.httpSearch || httpSearch)(q, maxResults, o);
     if (!h.ok) return { ok: false, error: h.error };

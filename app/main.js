@@ -14,9 +14,10 @@ import { createMemeLibrary } from "./src/meme.js";
 import { createWebUi } from "./src/webui.js";
 import { createVision, VISION_PERSONA } from "./src/vision.js";
 import { createTts } from "./src/tts.js";
-import { CONFIG_FILE, DATA_ROOT, BRAIN_TMP_DIR, WORKSPACE_ROOT } from "./src/paths.js";
+import { CONFIG_FILE, DATA_ROOT, BRAIN_TMP_DIR, WORKSPACE_ROOT, DSH_HOME } from "./src/paths.js";
 import { pickApiKey } from "./src/secrets.js";
 import { checkUpdate, applyUpdate, createDepsProbe, runDepFix } from "./src/update.js";
+import { createPluginProbe, installPlugin } from "./src/plugins.js";
 import { createRequire } from "node:module";
 
 const _require = createRequire(import.meta.url);
@@ -47,7 +48,7 @@ log("搜索：通道 " + rc.searchMode.toUpperCase() + "（" + (rc.searchMode ==
 const store = createStore(path.join(DATA_ROOT, "data"));
 const bot = createBot({ dataRoot: path.join(DATA_ROOT, "data"), botNames: [persona.botName], nicknames: [persona.botName] });
 const cli = resolveDshCli();
-const boot = ensureBrainProfile({ cliPath: cli, persona: persona, personaText: (String(getPath(cfg, "persona.globalText") || "").trim() || undefined) });
+const boot = ensureBrainProfile({ cliPath: cli, persona: persona, personaText: (String(getPath(cfg, "persona.globalText") || "").trim() || undefined), model: channelModel("brain", cfg) });
 log("大脑 profile：" + JSON.stringify({ ok: boot.ok, patch: boot.patch || null, error: boot.error || null }));
 
 // OneBot 客户端做成可重建的：改完接入设置点「重连」就能立刻生效，不用重启程序
@@ -87,7 +88,7 @@ const auditor = createAuditor({
   rubric: loadRubric(),
   runner: async function (req) {
     if (!cli) return { ok: false, error: "找不到 DSH 启动器" };
-    ensureBrainProfile({ cliPath: cli, profile: req.profile, personaText: req.personaText });
+    ensureBrainProfile({ cliPath: cli, profile: req.profile, personaText: req.personaText, model: channelModel("audit") });
     return runBrain({ cliPath: cli, profile: req.profile, promptText: req.promptText, timeoutMs: req.timeoutMs });
   }
 });
@@ -96,6 +97,8 @@ setAuditChannel(auditor);
 // N12 搜索：默认 C（本机直搜，零模型调用）；B 走独立的 qq-search profile
 const searchSvc = createSearch({
   mode: rc.searchMode,
+  freeSearchEnabled: rc.plugins ? rc.plugins.freeSearch : true,
+  freeSearchEngine: rc.plugins ? rc.plugins.freeSearchEngine : "bing",
   brainSearch: async function (req) {
     if (!cli) return { ok: false, error: "找不到 DSH 启动器" };
     ensureBrainProfile({ cliPath: cli, profile: SEARCH_PROFILE_ID, personaText: SEARCH_PERSONA });
@@ -180,6 +183,20 @@ async function listGroups() {
   });
 }
 
+// API 通道：大脑与二判都可以选择走社区插件 Our Free Model（provider 固定为 our-free-model）
+const OFM_PROVIDER = "our-free-model";
+const OFM_FALLBACK_MODEL = "ling-3.1-flash-free";
+function channelModel(kind, c) {
+  const conf = (c || (webui ? webui.getConfig() : cfg)) || {};
+  const p = conf.plugins || {};
+  if (kind === "brain") {
+    if (!p.ourFreeModelBrain) return null;
+    return { provider: OFM_PROVIDER, model: p.ourFreeModelBrainId || OFM_FALLBACK_MODEL };
+  }
+  if (!p.ourFreeModel) return null;
+  return { provider: OFM_PROVIDER, model: p.ourFreeModelId || OFM_FALLBACK_MODEL };
+}
+
 // 人设改了要立刻重渲染 profile 里的 personaPrefix（下一轮大脑调用生效），否则改了要等重启
 async function onConfigSaved(next) {
   // 接入类改动（WS 地址 / token）不需要重启：直接重建 OneBot 客户端
@@ -193,7 +210,7 @@ async function onConfigSaved(next) {
   if (!cli) return { ok: false, error: "找不到 DSH 启动器，改完要重启程序才生效", reconnect: linkNote };
   const p = personaFromConfig(next);
   const text = String(getPath(next, "persona.globalText") || "").trim();
-  const r = ensureBrainProfile({ cliPath: cli, persona: p, personaText: text || undefined });
+  const r = ensureBrainProfile({ cliPath: cli, persona: p, personaText: text || undefined, model: channelModel("brain", next) });
   if (!r.ok) return { ok: false, error: r.error || "写 profile 失败", reconnect: linkNote };
   return { ok: true, source: text ? "手写的全局人设" : "按字段拼装", patch: r.patch, reconnect: linkNote };
 }
@@ -223,8 +240,23 @@ async function doDepFix(id) {
   finally { depFixLock = false; depsProbe.reset(); }
 }
 
+// 社区插件兼容：探测 + 一键安装（动作写死在 plugins.js 的白名单里）
+const VENDOR_DIR = path.join(WORKSPACE_ROOT, "vendor");
+const pluginProbe = createPluginProbe({
+  dshHome: DSH_HOME, vendorDir: VENDOR_DIR, memeLib: memes,
+  config: function () { return webui ? webui.getConfig() : cfg; }
+});
+let pluginLock = false;
+async function doPluginInstall(id) {
+  if (pluginLock) return { ok: false, error: "上一个安装还没结束" };
+  pluginLock = true;
+  try { return installPlugin(id, { dshHome: DSH_HOME, vendorDir: VENDOR_DIR }); }
+  finally { pluginLock = false; }
+}
+
 const webui = createWebUi({
   config: cfg, table: table, store: store, memes: memes, runtime: runtime, labels: runtime.labels,
+  plugins: async function () { return pluginProbe.probe(); }, installPlugin: doPluginInstall,
   configFile: CONFIG_FILE, probeOnebot: probeOnebot, listGroups: listGroups, onConfigSaved: onConfigSaved,
   checkUpdate: doCheckUpdate, applyUpdate: doApplyUpdate, depsProbe: async function () { return depsProbe.probe(); }, depFix: doDepFix,
   reconnect: function () { return reconnectOnebot(liveCfg); }

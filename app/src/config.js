@@ -134,6 +134,20 @@ export function runtimeConfig(cfg) {
       rate: getPath(c, "runtime.voice.rate") || 0,
       maxChars: getPath(c, "runtime.voice.maxChars") || 60
     },
+    plugins: {
+      ourFreeModel: getPath(c, "plugins.ourFreeModel") !== false,
+      ourFreeModelId: getPath(c, "plugins.ourFreeModelId") || "",
+      freeSearch: getPath(c, "plugins.freeSearch") !== false,
+      freeSearchEngine: getPath(c, "plugins.freeSearchEngine") || "bing",
+      archify: getPath(c, "plugins.archify") !== false,
+      archifyCleanup: getPath(c, "plugins.archifyCleanup") !== false,
+      meme: getPath(c, "plugins.meme") !== false
+    },
+    ageStage: getPath(c, "persona.ageStage") === "幼年" ? "幼年" : "成年",
+    illustrations: {
+      young: getPath(c, "persona.illustrationYoung") || "角色形象图/幼年.jpg",
+      adult: getPath(c, "persona.illustrationAdult") || "角色形象图/成年.jpg"
+    },
     napcatWebui: getPath(c, "runtime.napcatWebui") || "http://127.0.0.1:6099",
     webuiEnabled: getPath(c, "runtime.webui.enabled") !== false,
     webuiPort: getPath(c, "runtime.webui.port") != null ? getPath(c, "runtime.webui.port") : 8799,

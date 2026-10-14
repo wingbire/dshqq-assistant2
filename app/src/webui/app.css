@@ -177,5 +177,8 @@ select{background:var(--panel2);border:1px solid var(--line);color:var(--fg);bor
 select:focus{border-color:var(--accent);box-shadow:0 0 0 3px rgba(47,127,240,.14)}
 .btn-sm:disabled{opacity:.45;cursor:not-allowed}
 
+.sec-title{font-size:13px;font-weight:700;color:var(--accent-deep);letter-spacing:.5px;margin:6px 2px -4px;display:flex;align-items:center;gap:8px}
+.sec-title:before{content:"";width:3px;height:14px;border-radius:2px;background:var(--accent-grad)}
+
 .muted{color:var(--dim)}
 code{background:var(--chip);border:1px solid var(--line);padding:1px 7px;border-radius:7px;font-size:12.5px}
