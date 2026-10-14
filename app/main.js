@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 
-import { loadConfig, runtimeConfig, redactConfig, loadFieldTable, saveConfig, defaultsFromTable } from "./src/config.js";
+import { loadConfig, runtimeConfig, redactConfig, loadFieldTable, saveConfig, defaultsFromTable, getPath } from "./src/config.js";
 import { createStore } from "./src/store.js";
 import { createBot } from "./src/index.js";
 import { createOneBot } from "./src/onebot.js";
@@ -42,7 +42,7 @@ log("搜索：通道 " + rc.searchMode.toUpperCase() + "（" + (rc.searchMode ==
 const store = createStore(path.join(DATA_ROOT, "data"));
 const bot = createBot({ dataRoot: path.join(DATA_ROOT, "data"), botNames: [persona.botName], nicknames: [persona.botName] });
 const cli = resolveDshCli();
-const boot = ensureBrainProfile({ cliPath: cli, persona: persona });
+const boot = ensureBrainProfile({ cliPath: cli, persona: persona, personaText: (String(getPath(cfg, "persona.globalText") || "").trim() || undefined) });
 log("大脑 profile：" + JSON.stringify({ ok: boot.ok, patch: boot.patch || null, error: boot.error || null }));
 
 const ob = createOneBot({
@@ -91,6 +91,7 @@ const vision = createVision({
 // N18 语音：TTS 走 Windows 自带 SAPI（离线、零依赖）
 const tts = createTts({ config: rc.voice, outDir: path.join(DATA_ROOT, "voice") });
 log("识图：" + (rc.vision.enabled ? rc.vision.mode + " / " + rc.vision.model : "关闭") + "；语音：" + (rc.voice.enabled ? rc.voice.voice : "关闭"));
+log("NapCat 配置页：" + rc.napcatWebui + "（配置端右上角有快捷入口）");
 
 const runtime = createRuntime({
   config: cfg, runtime: rc, store: store, bot: bot, search: searchSvc, memes: memes, vision: vision, tts: tts,
@@ -107,7 +108,50 @@ const runtime = createRuntime({
 });
 
 // N25 配置端：本地 HTTP 服务，只听 127.0.0.1
-const webui = createWebUi({ config: cfg, table: table, store: store, memes: memes, runtime: runtime, labels: runtime.labels, configFile: CONFIG_FILE });
+// 配置端要能看 OneBot/NapCat 的真实状态与群列表，所以给它两个探测函数（带短缓存，别把 OneBot 打爆）
+let obCache = { at: 0, value: null };
+async function probeOnebot(force) {
+  if (!force && obCache.value && Date.now() - obCache.at < 5000) return obCache.value;
+  const v = { state: ob.state(), selfId: ob.selfId(), online: false, good: false, version: null, nickname: null, protocol: null, error: null, at: Date.now() };
+  if (ob.state() === "open") {
+    const st = await ob.callActionAsync("get_status", {}, 4000);
+    const li = await ob.callActionAsync("get_login_info", {}, 4000);
+    const vi = await ob.callActionAsync("get_version_info", {}, 4000);
+    v.online = !!(st.ok && st.data && st.data.online);
+    v.good = !!(st.data && st.data.good);
+    v.error = st.ok ? null : (st.error || "get_status 失败");
+    if (li.ok && li.data) { v.selfId = String(li.data.user_id); v.nickname = li.data.nickname || null; }
+    if (vi.ok && vi.data) {
+      v.version = (vi.data.app_name || "NapCat") + " " + (vi.data.app_version || "?");
+      v.protocol = vi.data.protocol_version ? String(vi.data.protocol_version) : null;
+    }
+  }
+  obCache = { at: Date.now(), value: v };
+  return v;
+}
+async function listGroups() {
+  if (ob.state() !== "open") return [];
+  const r = await ob.callActionAsync("get_group_list", {}, 6000);
+  if (!r.ok || !Array.isArray(r.data)) return [];
+  return r.data.map(function (g) {
+    return { group_id: String(g.group_id), group_name: g.group_name || "", member_count: g.member_count, max_member_count: g.max_member_count };
+  });
+}
+
+// 人设改了要立刻重渲染 profile 里的 personaPrefix（下一轮大脑调用生效），否则改了要等重启
+async function onConfigSaved(next) {
+  if (!cli) return { ok: false, error: "找不到 DSH 启动器，改完要重启程序才生效" };
+  const p = personaFromConfig(next);
+  const text = String(getPath(next, "persona.globalText") || "").trim();
+  const r = ensureBrainProfile({ cliPath: cli, persona: p, personaText: text || undefined });
+  if (!r.ok) return { ok: false, error: r.error || "写 profile 失败" };
+  return { ok: true, source: text ? "手写的全局人设" : "按字段拼装", patch: r.patch, bytes: text ? text.length : undefined };
+}
+
+const webui = createWebUi({
+  config: cfg, table: table, store: store, memes: memes, runtime: runtime, labels: runtime.labels,
+  configFile: CONFIG_FILE, probeOnebot: probeOnebot, listGroups: listGroups, onConfigSaved: onConfigSaved
+});
 
 if (selftest) {
   if (rc.webuiEnabled) {

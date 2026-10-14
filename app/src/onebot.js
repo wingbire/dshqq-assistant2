@@ -93,6 +93,7 @@ export function createOneBot(opts) {
   };
   const sentIds = new Set();
   const seen = new Map();
+  const pendingActions = new Map();      // echo -> { resolve, timer }  —— 异步动作（get_status / get_group_list …）
   let selfId = o.selfId ? String(o.selfId) : null;
   let ws = null, stopped = false, retry = 0, timer = null;
   let state = "idle";
@@ -122,6 +123,12 @@ export function createOneBot(opts) {
     const data = typeof payload === "string" ? safeJson(payload) : payload;
     if (!data) return;
     if (data.echo != null && data.retcode != null) {          // 动作回执
+      const p = pendingActions.get(String(data.echo));
+      if (p) {
+        clearTimeout(p.timer);
+        pendingActions.delete(String(data.echo));
+        p.resolve({ ok: data.status === "ok" || data.retcode === 0, status: data.status, retcode: data.retcode, data: data.data, echo: data.echo });
+      }
       if (o.onAction) { try { o.onAction(data); } catch (e) {} }
       if (data.data && data.data.message_id != null) remember(data.data.message_id);
       return;
@@ -189,15 +196,31 @@ export function createOneBot(opts) {
     return send({ action: "send_group_msg", params: { group_id: Number(gid), message: [{ type: "record", data: { file: p } }] }, echo: echo });
   }
 
-  // 通用动作调用（取图片、取群成员等）
+  // 通用动作调用（不等回执，取图片、取群成员等）
   function callAction(action, params) {
     const echo = "dshqq-act-" + nowFn() + "-" + Math.floor(Math.random() * 1e6);
     send({ action: action, params: params || {}, echo: echo });
     return echo;
   }
 
+  // 等回执的动作调用 —— 配置端读 OneBot/NapCat 状态、群列表都靠它
+  function callActionAsync(action, params, timeoutMs) {
+    return new Promise(function (resolve) {
+      if (!ws || typeof ws.send !== "function") return resolve({ ok: false, error: "未连接 OneBot" });
+      const echo = "dshqq-rq-" + nowFn() + "-" + Math.floor(Math.random() * 1e6);
+      const timer = setTimeout(function () {
+        pendingActions.delete(echo);
+        resolve({ ok: false, error: "动作超时：" + action, timeout: true });
+      }, timeoutMs || 8000);
+      pendingActions.set(echo, { resolve: resolve, timer: timer });
+      const sentOk = send({ action: action, params: params || {}, echo: echo });
+      if (!sentOk) { clearTimeout(timer); pendingActions.delete(echo); resolve({ ok: false, error: "发送失败" }); }
+    });
+  }
+
   function close() {
     stopped = true;
+    for (const [echo, p] of Array.from(pendingActions.entries())) { clearTimeout(p.timer); p.resolve({ ok: false, error: "连接已关闭" }); pendingActions.delete(echo); }
     if (timer) clearTimeout(timer);
     setState("stopped");
     try { if (ws && ws.close) ws.close(); } catch (e) {}
@@ -205,7 +228,8 @@ export function createOneBot(opts) {
 
   return {
     connect: connect, close: close, send: send, sendGroupMsg: sendGroupMsg, sendGroupImage: sendGroupImage,
-    sendGroupRecord: sendGroupRecord, callAction: callAction,
+    sendGroupRecord: sendGroupRecord, callAction: callAction, callActionAsync: callActionAsync,
+    pendingActions: function () { return pendingActions.size; },
     state: function () { return state; }, selfId: function () { return selfId; },
     sentIds: sentIds, seenCount: function () { return seen.size; },
     config: cfg

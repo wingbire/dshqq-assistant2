@@ -69,6 +69,16 @@ export function createCommands(opts) {
     }
     let out = null;
     try { out = spec.handler({ evt: evt, args: parsed.args, parsed: parsed, ctx: ctx || {} }); } catch (e) { out = { ok: false, error: String(e && e.message) }; }
+    // handler 允许返回 Promise（例如要等 TTS 合成完）；dispatch 跟着返回 Promise
+    if (out && typeof out.then === "function") {
+      return out.then(function (v) {
+        const res = Object.assign({ handled: true, ok: true, name: spec.name, action: spec.action || spec.name }, v || {});
+        log.push({ at: (o.now ? o.now() : Date.now()), name: spec.name, uid: evt.uid, ok: !!res.ok });
+        return res;
+      }, function (e) {
+        return { handled: true, ok: false, name: spec.name, action: spec.action || spec.name, error: String(e && e.message) };
+      });
+    }
     const res = Object.assign({ handled: true, ok: true, name: spec.name, action: spec.action || spec.name }, out || {});
     log.push({ at: (o.now ? o.now() : Date.now()), name: spec.name, uid: evt.uid, ok: !!res.ok });
     return res;

@@ -45,6 +45,10 @@ export function createRuntime(deps) {
   const history = new Map();                    // gid -> [{ speaker, text, at }]  最多 contextWindow 条
   // N9（修订）：观察只在新群初期，攒满 observeUntilMessages 条后进半自动，semiAutoDays 天后全自动
   const stages = new Map();                     // gid -> { stage, observed, semiUntil, since }
+  // 配置端「状态」页要用的：分群计数 + 最近收到的消息（内存环形缓冲，重启即空；
+  // 需要跨重启看判定过程时配置端会回落到 observation.jsonl）
+  const perGroup = new Map();                   // gid -> { messages, replies, tokens, brainCalls, searches, memes, voice, lastAt }
+  const recentByGroup = new Map();              // gid -> [{ at, speaker, text, action, verdict, pSay, tier, reason }]
   // P3：反馈归因（按被回复人是否继续跟我聊）+ 人工标注队列
   const tracker = d.tracker || createTracker({ windowMs: rc.feedbackWindowMs != null ? rc.feedbackWindowMs : 90000 });
   const labels = d.labels || (store ? createLabelQueue({ store: store, minSamples: rc.labelMinSamples || 30 }) : null);
@@ -57,11 +61,11 @@ export function createRuntime(deps) {
   if (!commands.find("说") && !commands.find("say")) {
     commands.register({
       name: "说", aliases: ["say"], perm: "admin", action: "tts", help: "让小助手用语音说一句话（测试 TTS）",
-      handler: function (a) {
-        if (!tts || !tts.enabled()) return { reply: "语音没开（配置端 → 运行时 → 启用语音）" };
+      handler: async function (a) {
+        if (!tts || !tts.enabled()) return { reply: "语音没开（配置端 → 调整 → 语音）" };
         const text = String(a.args || "").trim();
         if (!text) return { reply: "用法：/说 要念的内容" };
-        const r = speak(a.evt.gid, text);
+        const r = await speak(a.evt.gid, text);
         if (!r.ok) return { reply: "TTS 失败：" + r.error };
         return { reply: null, bytes: r.bytes };
       }
@@ -77,6 +81,31 @@ export function createRuntime(deps) {
   }
 
   function adminConfig() { return cfg.admin || {}; }
+
+  function gstat(gid) {
+    const k = String(gid);
+    let s = perGroup.get(k);
+    if (!s) { s = { gid: k, messages: 0, replies: 0, tokens: 0, brainCalls: 0, searches: 0, memes: 0, voice: 0, lastAt: 0 }; perGroup.set(k, s); }
+    return s;
+  }
+  function pushRecent(gid, rec) {
+    const k = String(gid);
+    const arr = recentByGroup.get(k) || [];
+    arr.push(rec);
+    while (arr.length > 80) arr.shift();
+    recentByGroup.set(k, arr);
+  }
+  // 控制接口（配置端的快捷按钮）
+  function setGroupEnabled(gid, on) {
+    if (on) brakes.resumeGroup(gid); else brakes.stopGroup(gid, 999999, now());   // 999999 分钟 = 一直停
+    return { gid: String(gid), enabled: !!on };
+  }
+  function groupEnabled(gid) { return !brakes.state(gid, now()).stopped; }
+  function setGlobalPaused(v) {
+    brakes.setConfigPaused(v);
+    if (cfg) cfg.paused = !!v;
+    return !!v;
+  }
 
   function settle(records, atMs) {
     const list = records || [];
@@ -144,10 +173,11 @@ export function createRuntime(deps) {
     return out;
   }
 
-  // N18：TTS 统一入口 —— 指令与 [语音:] 标记都走这里，计数与失败上报只有一处
-  function speak(gid, text) {
+  // N18：TTS 统一入口 —— 指令与 [语音:] 标记都走这里，计数与失败上报只有一处。
+  // 用异步版合成：spawnSync 会把整个事件循环卡住 1~2 秒（心跳和别的消息全停），不能用在运行时。
+  async function speak(gid, text) {
     if (!tts || !tts.enabled()) return { ok: false, error: "语音未启用" };
-    const v = tts.synthesize(text);
+    const v = tts.synthesizeAsync ? await tts.synthesizeAsync(text) : tts.synthesize(text);
     if (!v.ok) {
       stats.voiceFailed += 1;
       observe({ kind: "voice_fail", gid: gid, error: v.error });
@@ -198,10 +228,17 @@ export function createRuntime(deps) {
 
   // N8：群档案排在「本轮任务」之后、上下文之前 —— 它每 refN 次才变一次
   function profileBlock(gid) {
-    if (!store || typeof store.loadProfile !== "function" || !bot.profilePrompt) return "";
+    if (!store || typeof store.loadProfile !== "function") return "";
     const prof = store.loadProfile(gid);
-    if (!prof || !(prof.rounds > 0)) return "";
-    return bot.profilePrompt(gid);
+    if (!prof) return "";
+    const lines = [];
+    // 本群专属人设（管理员手写）—— 只能进消息体：进系统提示词的话每个群都要一份 profile，
+    // 而且一改就打散前缀缓存。放这里既好改又不影响缓存。
+    if (prof.personaText && String(prof.personaText).trim()) {
+      lines.push("【本群专属人设（在这个群里额外要遵守的）】" + String.fromCharCode(10) + String(prof.personaText).trim());
+    }
+    if (prof.rounds > 0 && bot.profilePrompt) lines.push(bot.profilePrompt(gid));
+    return lines.join(String.fromCharCode(10, 10));
   }
 
   const STAGE_OBSERVE = "observe", STAGE_SEMI = "semi", STAGE_FULL = "full";
@@ -253,6 +290,13 @@ export function createRuntime(deps) {
 
   async function onEvent(evt) {
     stats.events += 1;
+    const gs = gstat(evt.gid);
+    gs.messages += 1;
+    gs.lastAt = evt.now || now();
+    pushRecent(evt.gid, {
+      at: evt.now || now(), speaker: evt.speaker || "", uid: String(evt.uid || ""),
+      text: evt.text || (evt.hasImage ? "[图片]" : ""), hasImage: !!evt.hasImage, images: (evt.images || []).length
+    });
     // P3：这条消息同时是「上一条回复」的判决书 —— 先结算
     settle(tracker.resolve(evt), evt.now);
     const st = brakes.state(evt.gid, evt.now);
@@ -270,7 +314,7 @@ export function createRuntime(deps) {
     }
 
     // N17：指令走注册表 —— 权限判定与二次确认都在 commands.js 里
-    const cRes = commands.dispatch(evt, { config: adminConfig(), budget: budget, brakes: brakes, store: store });
+    const cRes = await commands.dispatch(evt, { config: adminConfig(), budget: budget, brakes: brakes, store: store });
     if (cRes.handled) {
       stats.adminCmds += 1;
       if (cRes.reply) send(evt.gid, cRes.reply);
@@ -301,6 +345,14 @@ export function createRuntime(deps) {
       const evt = Object.assign({}, evtDefaults, lastBot.get(String(rawEvt.gid)) || {}, rawEvt);
       const dec = await bot.handleEvent(evt);
       decisions.push(Object.assign({}, dec, { evt: evt }));
+      const arr = recentByGroup.get(String(batch.gid)) || [];
+      for (let i = arr.length - 1; i >= 0; i--) {
+        if (!arr[i].verdict && arr[i].text === (rawEvt.text || (rawEvt.hasImage ? "[图片]" : ""))) {
+          arr[i].verdict = dec.verdict; arr[i].action = dec.action; arr[i].pSay = dec.pSay;
+          arr[i].tier = dec.tier; arr[i].reason = (dec.reason || []).slice(0, 3);
+          break;
+        }
+      }
       observe({
         kind: "decision", gid: batch.gid, uid: batch.uid, speaker: evt.speaker,
         text: evt.text, atBot: !!evt.atBot, replyToBot: !!evt.replyToBot,
@@ -418,11 +470,23 @@ export function createRuntime(deps) {
     // N18：语音（默认关闭）—— 有标记才念，念不出来不影响正文
     let voiceInfo = null;
     if (voiced.voice) {
-      const v = speak(evt.gid, voiced.voice);
+      const v = await speak(evt.gid, voiced.voice);
       voiceInfo = v.ok ? { chars: v.chars, bytes: v.bytes } : { error: v.error };
     }
     const memeInfo = await attachMeme(evt.gid, parsed.mood, dec.tier);
     stats.replies += 1;
+    {
+      const gs = gstat(evt.gid);
+      gs.replies += 1;
+      gs.brainCalls += (dec.action === "brain" ? 1 : 0);
+      gs.searches += (searchInfo ? 1 : 0);
+      gs.memes += (memeInfo ? 1 : 0);
+      gs.voice += (voiceInfo && voiceInfo.bytes ? 1 : 0);
+      if (usage) {
+        const tk = Number(usage.totalTokens) || (Number(usage.inputTokens) + Number(usage.outputTokens) + Number(usage.cacheReadTokens) + Number(usage.cacheWriteTokens));
+        gs.tokens += tk;
+      }
+    }
     if (bot.proactive && bot.proactive.markBotReply) bot.proactive.markBotReply(at, evt.gid);
     lastBot.set(String(evt.gid), { lastBotText: sent.join(""), lastBotAt: at });
     // P3：登记一条待定反馈，等这个群的下一条消息来判它是正还是负
@@ -462,6 +526,17 @@ export function createRuntime(deps) {
     history: function (gid) { return (history.get(String(gid)) || []).slice(); },
     stage: function (gid) { return Object.assign({}, stageOf(gid, now())); },
     tracker: tracker, labels: labels,
+    groups: function () { return Array.from(perGroup.values()).sort(function (a, b) { return b.lastAt - a.lastAt; }); },
+    groupStats: function (gid) { return Object.assign({}, gstat(gid)); },
+    recentMessages: function (gid, limit) { const a = (recentByGroup.get(String(gid)) || []).slice(); return limit ? a.slice(-limit) : a; },
+    allRecent: function (limit) {
+      const out = [];
+      for (const [gid, arr] of recentByGroup) for (const r of arr) out.push(Object.assign({ gid: gid }, r));
+      out.sort(function (a, b) { return b.at - a.at; });
+      return limit ? out.slice(0, limit) : out;
+    },
+    setGroupEnabled: setGroupEnabled, groupEnabled: groupEnabled,
+    setGlobalPaused: setGlobalPaused, globalPaused: function () { return !!brakes.info().configPaused; },
     pendingFeedback: function () { return tracker.pendingCount(); },
     labelStatus: function () { return labels ? labels.status() : null; },
     observe: observe, stats: function () { return Object.assign({}, stats); }

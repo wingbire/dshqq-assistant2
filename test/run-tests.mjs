@@ -5,7 +5,7 @@ import { engagementOf, reward, costOf } from "../app/src/score.js";
 import { createProactive } from "../app/src/proactive.js";
 import { createStore } from "../app/src/store.js";
 import { createAddressee } from "../app/src/addressee.js";
-import { parseEvents, buildArgs, brainEnv, cacheHitRate, PROFILE_DEFAULT, DEPTH_POLICY_DEFAULT } from "../app/src/brain.js";
+import { parseEvents, buildArgs, brainEnv, cacheHitRate, PROFILE_DEFAULT, DEPTH_POLICY_DEFAULT, ensureBrainProfile } from "../app/src/brain.js";
 import { maskKey, parseRefsApiKey, pickApiKey, loadSecrets, saveSecrets } from "../app/src/secrets.js";
 import { buildPersonaText, renderProfilePatch, writeProfilePatch, writeTierOverlay, renderTierOverlay, writeAllTierOverlays, TIER_EFFORT, DEFAULT_PERSONA, PROFILE_ID } from "../app/src/dshprofile.js";
 import { DATA_ROOT, DSH_HOME, APP_ROOT, BRAIN_TMP_DIR } from "../app/src/paths.js";
@@ -24,7 +24,7 @@ import { createLabelQueue, foldLabels, pendingOf, labeledOf, agreementStats, sho
 import { buildProfilePrompt } from "../app/src/profile.js";
 import { createMemeLibrary, shouldAttachMeme, scoreRow, scanPack, resolveMemeRoots, MEME_DEFAULTS } from "../app/src/meme.js";
 import { createCommands, createDefaultCommands, permLevelOf, allow } from "../app/src/commands.js";
-import { createWebUi, summarizeObservations, DEFAULT_PORT } from "../app/src/webui.js";
+import { createWebUi, summarizeObservations, summarizeCost, startOfToday, DEFAULT_PORT } from "../app/src/webui.js";
 import { createVision, isImageSegment, imageSegmentsOf, mimeOf, resolveLocalImage, buildHttpBody, parseHttpAnswer, injectVision, VISION_DEFAULTS, VISION_PROFILE_ID } from "../app/src/vision.js";
 import { createTts, parseVoiceTag, buildSapiScript, TTS_DEFAULTS } from "../app/src/tts.js";
 import fs from "node:fs";
@@ -1607,6 +1607,155 @@ t("runtime: /说 指令走 TTS", async function () {
   eq(records.length, 1);
   const deny = await rt.onEvent({ gid: "A", uid: "999", role: "member", speaker: "路人", text: "/说 我也要", now: 0 });
   eq(deny.ok, false);
+});
+
+t("webui: 状态页按群取数 + OneBot/群列表 + 控制动作", async function () {
+  const table = loadFieldTable();
+  const cfg = deepMerge(defaultsFromTable(table), {});
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "ui2-" + Date.now());
+  const store = createStore(path.join(dir, "data"));
+  store.addObservation({ kind: "decision", gid: "A", uid: "1", text: "小肥鱼 在吗", verdict: "yes", action: "brain", pSay: 0.9, tier: "mid" });
+  store.addObservation({ kind: "sent", gid: "A", uid: "1", usage: { inputTokens: 200, outputTokens: 20, cacheReadTokens: 1800, cacheWriteTokens: 0 } });
+  store.addObservation({ kind: "sent", gid: "B", uid: "2", usage: { inputTokens: 100, outputTokens: 10, cacheReadTokens: 900, cacheWriteTokens: 0 } });
+  const calls = [];
+  const fakeRuntime = {
+    status: function () { return { mode: "auto", stats: {}, brakes: { stopFile: null, configPaused: false, groups: {} }, budget: { used: 240, limit: 5000000, ratio: 0.0001, mode: "normal" } }; },
+    groups: function () { return [{ gid: "A", messages: 1, replies: 1, tokens: 240, brainCalls: 1, lastAt: 1 }]; },
+    recentMessages: function (gid) { return [{ at: 1, speaker: "甲", text: "小肥鱼 在吗", verdict: "yes", action: "brain", pSay: 0.9, tier: "mid" }]; },
+    allRecent: function () { return []; },
+    groupStats: function (gid) { return { gid: gid, messages: 1, replies: 1, tokens: 240 }; },
+    stage: function () { return { stage: "semi", observed: 90, until: 80 }; },
+    setGroupEnabled: function (gid, on) { calls.push(["group", gid, on]); return { gid: gid, enabled: on }; },
+    setGlobalPaused: function (v) { calls.push(["paused", v]); return v; },
+    budget: { limits: { dailyTokens: 5000000 }, status: function () { return { used: 240, limit: 5000000, ratio: 0.0001, mode: "normal" }; } }
+  };
+  const ui = createWebUi({
+    config: cfg, table: table, store: store, runtime: fakeRuntime, configFile: path.join(dir, "app.json"),
+    probeOnebot: async function () { return { state: "open", selfId: "999", nickname: "小号", online: true, version: "NapCat x" }; },
+    listGroups: async function () { return [{ group_id: "A", group_name: "甲群", member_count: 3 }]; }
+  });
+  const info = await ui.listen(0);
+  try {
+    const st = await (await fetch(info.url + "/api/status?gid=A")).json();
+    eq(st.scope, "A");
+    eq(st.cost.units, 240, "只看 A 群的用量");
+    eq(st.cost.cacheHitRate, 0.9);
+    eq(st.cost.replies, 1);
+    eq(st.stage.stage, "semi");
+    eq(st.messages.length, 1);
+    const all = await (await fetch(info.url + "/api/status")).json();
+    eq(all.cost.units, 360, "不指定群就是全部");
+    eq(all.cost.perGroup.length, 2);
+
+    const ob = await (await fetch(info.url + "/api/onebot")).json();
+    eq(ob.state, "open");
+    eq(ob.nickname, "小号");
+    eq(ob.version, "NapCat x");
+
+    const gp = await (await fetch(info.url + "/api/groups")).json();
+    const ids = gp.groups.map(function (g) { return g.group_id; }).sort();
+    eq(ids.indexOf("A") >= 0, true);
+    eq(gp.groups.filter(function (g) { return g.group_name === "甲群"; }).length, 1);
+
+    const a1 = await (await fetch(info.url + "/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "groupDisable", gid: "A" }) })).json();
+    eq(a1.ok, true);
+    eq(calls[calls.length - 1][2], false, "停用应传 false");
+    await fetch(info.url + "/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "globalStop" }) });
+    eq(calls[calls.length - 1][0], "paused");
+    eq(calls[calls.length - 1][1], true);
+    eq(ui.getConfig().paused, true, "全局停用要落到配置里");
+
+    const a2 = await (await fetch(info.url + "/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "setBudget", value: 8000000 }) })).json();
+    eq(a2.dailyTokens, 8000000);
+    eq(fakeRuntime.budget.limits.dailyTokens, 8000000, "运行中的预算也要跟着变");
+    eq(ui.getConfig().runtime.budget.dailyTokens, 8000000, "并写进配置");
+    eq(ui.getConfig().runtime.napcatWebui, "http://127.0.0.1:6099", "NapCat 配置页入口有默认值");
+
+    const bad = await fetch(info.url + "/api/action", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ action: "不存在" }) });
+    eq(bad.status, 400);
+  } finally { await ui.close(); }
+});
+
+t("webui: 群档案可读可写可清空（管理员手改）", async function () {
+  const table = loadFieldTable();
+  const cfg = defaultsFromTable(table);
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "pf-" + Date.now());
+  const store = createStore(path.join(dir, "data"));
+  store.saveProfile("A", { interests: ["报错"], dislikes: ["催更"], habits: "句短", rounds: 3 });
+  const ui = createWebUi({ config: cfg, table: table, store: store });
+  const info = await ui.listen(0);
+  try {
+    const g = await (await fetch(info.url + "/api/profile?gid=A")).json();
+    eq(g.ok, true);
+    eq(g.profile.interests[0], "报错");
+    ok(g.prompt.indexOf("【本群画像】") >= 0, "要给出实际拼进 prompt 的样子");
+    ok(g.prompt.indexOf("报错") >= 0);
+
+    const p = await (await fetch(info.url + "/api/profile", {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ gid: "A", interests: ["报错", "第五层"], notes: "管理员加的", personaText: "这个群叫我老鱼" })
+    })).json();
+    eq(p.ok, true);
+    eq(p.profile.interests.length, 2);
+    eq(p.profile.updatedBy, "admin");
+    eq(p.profile.rounds, 3, "手改不能把重炼轮数抹掉");
+    eq(store.loadProfile("A").personaText, "这个群叫我老鱼");
+    eq(store.loadProfile("A").habits, "句短", "没提交的字段要保持原样");
+
+    const del = await (await fetch(info.url + "/api/profile?gid=A", { method: "DELETE" })).json();
+    eq(del.ok, true);
+    eq(store.loadProfile("A"), null);
+    const miss = await fetch(info.url + "/api/profile");
+    eq(miss.status, 400, "不给 gid 要报错");
+  } finally { await ui.close(); }
+});
+
+t("runtime: 本群专属人设作为消息体进 prompt", async function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "gp-" + Date.now());
+  const store = createStore(path.join(dir, "data"));
+  store.saveProfile("A", { interests: ["报错"], rounds: 2, personaText: "这个群叫我老鱼，别叫小肥鱼" });
+  const prompts = [];
+  const rt = createRuntime({
+    config: {}, runtime: { observe: false, coalesceWindowMs: 50 },
+    store: store,
+    bot: Object.assign(fakeBot({ tier: "mid" }), {
+      profilePrompt: function (gid) { return buildProfilePrompt(store.loadProfile(gid) || {}); },
+      observe: function () { return { refit: false }; }
+    }),
+    send: function () {}, askBrain: async function (o) { prompts.push(o.promptText); return { ok: true, text: "好。", usage: { totalTokens: 5 } }; },
+    now: function () { return 0; }, sleep: async function () {}, sendGapMs: 0
+  });
+  await rt.onEvent({ gid: "A", uid: "u1", speaker: "甲", text: "在吗", now: 0 });
+  await rt.tick(300);
+  const p = prompts[0] || "";
+  ok(p.indexOf("【本群专属人设") >= 0, "应有本群专属人设块");
+  ok(p.indexOf("叫我老鱼") >= 0, "内容要进去");
+  ok(p.indexOf("【本群画像】") >= 0, "群档案也还在");
+  ok(p.indexOf("【本群专属人设") < p.indexOf("【群里的上下文"), "人设块要在上下文之前");
+});
+
+t("brain: 手写的全局人设整段覆盖字段拼装", function () {
+  const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "app", "dsh-data", "_test", "gs-" + Date.now());
+  const dshHome = path.join(dir, "dsh-home");
+  fs.mkdirSync(path.join(dshHome, "profiles", "qq-brain"), { recursive: true });
+  fs.writeFileSync(path.join(dshHome, "profiles", "qq-brain", "package.json"), "{}");
+  const r = ensureBrainProfile({
+    dshHome: dshHome, profile: "qq-brain",
+    overrideLaunch: { exe: "x", cliJs: "y" },
+    persona: { botName: "字段名" },
+    personaText: "我是手写的整段人设，不来自字段。"
+  });
+  eq(r.ok, true);
+  const patch = JSON.parse(fs.readFileSync(r.patch, "utf8"));
+  eq(patch[0].config.personaPrefix, "我是手写的整段人设，不来自字段。");
+  ok(patch[0].config.personaPrefix.indexOf("字段名") < 0, "手写时不能被字段拼装覆盖");
+  const r2 = ensureBrainProfile({
+    dshHome: dshHome, profile: "qq-brain",
+    overrideLaunch: { exe: "x", cliJs: "y" },
+    persona: { botName: "小肥鱼", traits: ["嘴贫但有分寸"] }
+  });
+  const patch2 = JSON.parse(fs.readFileSync(r2.patch, "utf8"));
+  ok(patch2[0].config.personaPrefix.indexOf("小肥鱼") >= 0, "不写全局人设时回到字段拼装");
 });
 
 // === 汇总（新增测试请插在这一行之前，否则异步测试不会被等待）===

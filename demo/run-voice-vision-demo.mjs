@@ -22,6 +22,15 @@ const checks = [];
 function check(name, pass, detail) { checks.push({ name: name, pass: !!pass }); console.log((pass ? "PASS " : "FAIL ") + name + (detail != null ? "  :: " + detail : "")); }
 const wait = function (ms) { return new Promise(function (r) { setTimeout(r, ms); }); };
 async function drive(rt, ms, step) { const t0 = Date.now(); while (Date.now() - t0 < ms) { await rt.tick(); await wait(step || 60); } }
+// 等一个条件成立（TTS 要起 PowerShell 念一遍，1~2 秒很正常，不能只睡固定时长就断言）
+async function until(fn, timeoutMs) {
+  const t0 = Date.now();
+  while (Date.now() - t0 < (timeoutMs || 8000)) { if (fn()) return true; await wait(120); }
+  return false;
+}
+const recCount = function () {
+  return srv.received.filter(function (r) { return r && r.action === "send_group_msg" && Array.isArray(r.params.message) && r.params.message[0] && r.params.message[0].type === "record"; }).length;
+};
 
 // 造一张真实的本地图片（1×1 PNG），让识图链路走真文件
 const imgPath = path.join(DATA, "test.png");
@@ -84,9 +93,10 @@ check("识图失败不影响回复（此处应成功）", rt.stats().visionFail 
 console.log("");
 console.log("=== ② 语音：管理员 /说 → 真 TTS → record 段 ===");
 srv.groupMessage({ group_id: GID, user_id: 1001, nickname: "群主", role: "owner", segments: [{ type: "text", data: { text: "/说 大家好,我是小肥鱼" } }] });
-await drive(rt, 800);
+await drive(rt, 300);
+const gotRecord = await until(function () { return recCount() >= 1; }, 12000);
 const recs = srv.received.filter(function (r) { return r && r.action === "send_group_msg" && Array.isArray(r.params.message) && r.params.message[0] && r.params.message[0].type === "record"; });
-check("发出去了一个 record 段", recs.length === 1, "record 段数=" + recs.length);
+check("发出去了一个 record 段", recs.length === 1 && gotRecord, "record 段数=" + recs.length);
 if (recs.length) {
   const f = recs[0].params.message[0].data.file;
   const exists = fs.existsSync(f);
@@ -110,7 +120,9 @@ const before = rt.stats().voiceSent;
 const recsBefore = srv.received.filter(function (r) { return r && r.action === "send_group_msg" && Array.isArray(r.params.message) && r.params.message[0] && r.params.message[0].type === "record"; }).length;
 voiceMode = true;   // 让假大脑这一轮带上 [语音: …]
 srv.groupMessage({ group_id: GID, user_id: 2003, nickname: "乙", segments: [{ type: "at", data: { qq: "999" } }, { type: "text", data: { text: " 那你说一句听听" } }] });
-await drive(rt, 1200);
+await drive(rt, 400);
+await until(function () { return recCount() >= recsBefore + 1; }, 12000);
+await drive(rt, 200);
 voiceMode = false;
 const recsAfter = srv.received.filter(function (r) { return r && r.action === "send_group_msg" && Array.isArray(r.params.message) && r.params.message[0] && r.params.message[0].type === "record"; }).length;
 check("[语音:] 标记也会发 record", recsAfter === recsBefore + 1, "record " + recsBefore + " -> " + recsAfter);

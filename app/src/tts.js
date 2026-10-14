@@ -1,6 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 
 // N18 决策：语音走 TTS → NapCat 发 QQ 语音。
 // TTS 用 Windows 自带的 SAPI（System.Speech），**零依赖、离线、不发任何东西出去**。
@@ -66,7 +66,57 @@ export function createTts(opts) {
     return { ok: true, file: file, bytes: bytes, chars: t.length };
   }
 
-  return { config: cfg, enabled: enabled, synthesize: synthesize, stats: function () { return Object.assign({}, stats); } };
+  // 异步版：用 spawn，不阻塞事件循环。运行时用这个（同步版留给单测）
+  function synthesizeAsync(text, opts2) {
+    const t = String(text == null ? "" : text).trim();
+    if (!enabled()) return Promise.resolve({ ok: false, error: "语音未启用" });
+    if (!t) return Promise.resolve({ ok: false, error: "没有文字" });
+    if (t.length > cfg.maxChars) return Promise.resolve({ ok: false, error: "文字太长（" + t.length + " > " + cfg.maxChars + "）" });
+    const dir = (opts2 && opts2.outDir) || outDir;
+    if (!dir) return Promise.resolve({ ok: false, error: "没有配置输出目录" });
+    fs.mkdirSync(dir, { recursive: true });
+    const file = path.join(dir, "voice-" + Date.now() + "-" + Math.floor(Math.random() * 1e6) + ".wav");
+    stats.calls += 1;
+    const script = buildSapiScript(t, file, cfg);
+    return new Promise(function (resolve) {
+      let done = false;
+      let child = null;
+      const timer = setTimeout(function () {
+        if (done) return;
+        done = true;
+        try { if (child) child.kill(); } catch (e) {}
+        stats.fail += 1; stats.lastError = "TTS 超时";
+        resolve({ ok: false, error: "TTS 超时" });
+      }, cfg.timeoutMs || TTS_DEFAULTS.timeoutMs);
+      try {
+        child = spawn("powershell", ["-NoProfile", "-NonInteractive", "-Command", script], { windowsHide: true });
+      } catch (e) {
+        clearTimeout(timer); stats.fail += 1; stats.lastError = String(e && e.message);
+        return resolve({ ok: false, error: stats.lastError });
+      }
+      let err = "";
+      try { child.stderr.on("data", function (d) { err += d.toString(); }); } catch (e) {}
+      child.on("error", function (e) {
+        if (done) return; done = true; clearTimeout(timer);
+        stats.fail += 1; stats.lastError = String(e && e.message);
+        resolve({ ok: false, error: stats.lastError });
+      });
+      child.on("close", function (code) {
+        if (done) return; done = true; clearTimeout(timer);
+        let bytes = 0;
+        try { bytes = fs.statSync(file).size; } catch (e) { bytes = 0; }
+        if (code !== 0 || bytes <= 1000) {
+          stats.fail += 1; stats.lastError = String(err || "TTS 失败").slice(0, 160);
+          try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (e) {}
+          return resolve({ ok: false, error: stats.lastError, status: code });
+        }
+        stats.ok += 1; stats.lastBytes = bytes;
+        resolve({ ok: true, file: file, bytes: bytes, chars: t.length });
+      });
+    });
+  }
+
+  return { config: cfg, enabled: enabled, synthesize: synthesize, synthesizeAsync: synthesizeAsync, stats: function () { return Object.assign({}, stats); } };
 }
 
 // 从大脑输出里摘出 [语音: 文本] 标记

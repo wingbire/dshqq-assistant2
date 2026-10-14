@@ -134,6 +134,7 @@ export function runtimeConfig(cfg) {
       rate: getPath(c, "runtime.voice.rate") || 0,
       maxChars: getPath(c, "runtime.voice.maxChars") || 60
     },
+    napcatWebui: getPath(c, "runtime.napcatWebui") || "http://127.0.0.1:6099",
     webuiEnabled: getPath(c, "runtime.webui.enabled") !== false,
     webuiPort: getPath(c, "runtime.webui.port") != null ? getPath(c, "runtime.webui.port") : 8799,
     autojoinRate: getPath(c, "autojoin.rate") != null ? getPath(c, "autojoin.rate") : 0.25,
