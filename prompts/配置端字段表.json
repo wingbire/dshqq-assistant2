@@ -354,6 +354,34 @@
       "键前缀": "napcat",
       "字段": [
         {
+          "键": "napcat.launchPath",
+          "标签": "NapCat 启动程序路径",
+          "类型": "string",
+          "默认": "",
+          "说明": "留空 = 启动器自己在常见位置找 NapCatWinBootMain.exe"
+        },
+        {
+          "键": "napcat.autoLaunch",
+          "标签": "启动小助手时顺带拉起 NapCat",
+          "类型": "bool",
+          "默认": true,
+          "说明": "启动器会等 OneBot 端口通了再拉起小助手，省得它一上来就连不上"
+        },
+        {
+          "键": "napcat.autoClose",
+          "标签": "退出小助手时顺带关闭 NapCat",
+          "类型": "bool",
+          "默认": true,
+          "说明": "只关 NapCat 目录里的进程；你自己装的 QQ 不会被牵连"
+        },
+        {
+          "键": "napcat.hideWindow",
+          "标签": "把 NapCat 窗口藏在后台",
+          "类型": "bool",
+          "默认": true,
+          "说明": "启动时不给它开控制台，并持续把它的窗口收起来"
+        },
+        {
           "键": "napcat.wsUrl",
           "标签": "OneBot WS 地址",
           "类型": "string",
